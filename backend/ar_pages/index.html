@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FurniVision — AI Room Design & AR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy-deep: #0B2545;
+    --navy-blue: #0D3A66;
+    --navy-panel: #102A4C;
+    --cyan-line: #8ECAE6;
+    --cyan-bright: #B8E2F2;
+    --paper: #F7F9FB;
+    --slate: #7C93AC;
+    --amber: #FFB703;
+    --green: #4CAF7D;
+    --red: #E4623B;
+    --radius-sm: 4px;
+    --radius-md: 10px;
+    --radius-lg: 18px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--navy-deep);
+    color: var(--paper);
+    font-family: 'Space Grotesk', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  .grid-backdrop {
+    position: fixed; inset: -10% -10% -10% -10%;
+    background-image:
+      linear-gradient(var(--cyan-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--cyan-line) 1px, transparent 1px);
+    background-size: 34px 34px;
+    opacity: 0.12;
+    animation: gridDrift 60s linear infinite;
+    pointer-events: none; z-index: 0;
+  }
+  @keyframes gridDrift { from { transform: translate(0,0); } to { transform: translate(34px, 34px); } }
+
+  .screen { position: relative; z-index: 1; min-height: 100vh; }
+  .screen[hidden] { display: none !important; }
+  .fade-in { animation: fadeIn 0.5s ease both; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) {
+    .grid-backdrop { animation: none; }
+    .fade-in { animation: none; }
+  }
+
+  .home-nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 5;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 20px 28px;
+  }
+  .brand-mark { font-weight: 700; font-size: 17px; letter-spacing: -0.01em; cursor: pointer; }
+  .brand-mark span { color: var(--amber); }
+
+  /* ---------- HOME ---------- */
+  #screen-home {
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 24px;
+  }
+  .home-content { max-width: 640px; }
+  .home-content h1 {
+    font-size: clamp(38px, 7vw, 68px);
+    font-weight: 800; line-height: 1.05; letter-spacing: -0.02em;
+    margin: 0 0 20px;
+  }
+  .home-content .accent-word { color: var(--cyan-bright); }
+  .home-content p {
+    font-size: 16px; color: var(--slate); line-height: 1.7;
+    max-width: 460px; margin: 0 auto 36px;
+  }
+  .btn-primary {
+    background: var(--amber); color: var(--navy-deep); border: none;
+    border-radius: var(--radius-md); font-family: 'Space Grotesk', sans-serif;
+    font-weight: 700; font-size: 16px; padding: 16px 34px; cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+    box-shadow: 0 8px 24px rgba(255,183,3,0.18);
+  }
+  .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(255,183,3,0.28); }
+  .btn-primary:active { transform: translateY(0px) scale(0.98); }
+
+  /* ---------- CHOOSE PATH ---------- */
+  #screen-choose {
+    display: flex; align-items: center; justify-content: center;
+    padding: 90px 24px 40px;
+  }
+  .choose-wrap { max-width: 920px; width: 100%; }
+  .choose-heading { text-align: center; margin-bottom: 40px; }
+  .choose-heading h2 { font-size: clamp(24px, 4vw, 32px); font-weight: 700; margin: 0 0 10px; }
+  .choose-heading p { color: var(--slate); font-size: 14px; margin: 0; }
+
+  .path-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  @media (max-width: 720px) { .path-grid { grid-template-columns: 1fr; } }
+
+  .path-card {
+    background: var(--navy-blue);
+    border: 1px solid rgba(142,202,230,0.18);
+    border-radius: var(--radius-lg);
+    padding: 36px 30px;
+    cursor: pointer;
+    position: relative; overflow: hidden;
+    transition: transform 0.18s, border-color 0.18s;
+  }
+  .path-card:hover { transform: translateY(-5px); }
+  .path-card:active { transform: translateY(-2px) scale(0.99); }
+  .path-card.cyan:hover { border-color: var(--cyan-bright); }
+  .path-card.amber:hover { border-color: var(--amber); }
+
+  .path-diagram { width: 100%; height: 100px; margin-bottom: 22px; }
+  .path-title { font-size: 21px; font-weight: 700; margin-bottom: 8px; }
+  .path-desc { font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--slate); line-height: 1.6; }
+  .path-cta {
+    margin-top: 20px; font-family: 'IBM Plex Mono', monospace; font-size: 11.5px;
+    font-weight: 600; letter-spacing: 0.03em;
+  }
+  .path-card.cyan .path-cta { color: var(--cyan-bright); }
+  .path-card.amber .path-cta { color: var(--amber); }
+
+  /* ---------- DESIGN FLOW ---------- */
+  #screen-design { padding: 90px 24px 80px; }
+  .design-wrap { max-width: 1180px; margin: 0 auto; }
+
+  .grid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 22px; align-items: start; }
+  @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--navy-panel);
+    border: 1px solid rgba(142, 202, 230, 0.18);
+    border-radius: var(--radius-md);
+    padding: 28px;
+  }
+
+  .panel-heading { font-size: 18px; font-weight: 700; margin: 0 0 22px; }
+
+  .field-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  .field { margin-bottom: 16px; }
+
+  label {
+    display: block; font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    color: var(--slate); margin-bottom: 7px;
+  }
+
+  input[type="text"], input[type="number"], select {
+    width: 100%; background: var(--navy-deep);
+    border: 1px solid rgba(142, 202, 230, 0.3); border-radius: var(--radius-sm);
+    color: var(--paper); font-family: 'Space Grotesk', sans-serif; font-size: 14.5px;
+    padding: 11px 13px; outline: none; transition: border-color 0.15s;
+  }
+  input:focus, select:focus, button:focus-visible, .file-btn:focus-within {
+    border-color: var(--amber); box-shadow: 0 0 0 3px rgba(255, 183, 3, 0.16);
+  }
+  select {
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238ECAE6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 14px center; padding-right: 34px;
+  }
+
+  .file-btn {
+    display: flex; align-items: center; gap: 10px; background: var(--navy-deep);
+    border: 1px dashed rgba(142, 202, 230, 0.4); border-radius: var(--radius-sm);
+    padding: 11px 13px; font-family: 'IBM Plex Mono', monospace; font-size: 12.5px;
+    color: var(--slate); cursor: pointer;
+  }
+  .file-btn input { display: none; }
+  .file-btn.has-file { border-style: solid; border-color: var(--cyan-line); color: var(--cyan-bright); }
+
+  .run-btn {
+    width: 100%; margin-top: 8px; background: var(--amber); color: var(--navy-deep);
+    border: none; border-radius: var(--radius-sm); font-weight: 700; font-size: 15px;
+    padding: 15px 18px; cursor: pointer; transition: transform 0.1s, background 0.15s;
+  }
+  .run-btn:hover { background: #ffc531; }
+  .run-btn:active { transform: scale(0.99); }
+  .run-btn:disabled { background: rgba(255,183,3,0.3); cursor: not-allowed; color: rgba(11,37,69,0.5); }
+
+  .hint { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--slate); margin-top: 10px; line-height: 1.6; }
+
+  .stages { display: flex; flex-direction: column; gap: 0; }
+  .stage { display: flex; align-items: flex-start; gap: 14px; padding: 13px 0; position: relative; }
+  .stage:not(:last-child)::after {
+    content: ""; position: absolute; left: 10px; top: 34px; bottom: -13px; width: 1px;
+    background: repeating-linear-gradient(180deg, rgba(142,202,230,0.35) 0 4px, transparent 4px 8px);
+  }
+  .stage-dot {
+    width: 21px; height: 21px; border-radius: 50%; border: 2px solid rgba(142, 202, 230, 0.35);
+    background: var(--navy-deep); flex-shrink: 0; margin-top: 2px;
+    display: flex; align-items: center; justify-content: center;
+    transition: border-color 0.25s, background 0.25s;
+  }
+  .stage-dot::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: transparent; transition: background 0.25s; }
+  .stage.active .stage-dot { border-color: var(--amber); background: rgba(255,183,3,0.12); }
+  .stage.active .stage-dot::after { background: var(--amber); animation: pulse 1s ease-in-out infinite; }
+  .stage.done .stage-dot { border-color: var(--green); background: rgba(76,175,125,0.14); }
+  .stage.done .stage-dot::after { background: var(--green); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .stage-body { flex: 1; }
+  .stage-name { font-weight: 600; font-size: 14px; margin-bottom: 2px; color: rgba(247,249,251,0.5); transition:color 0.25s; }
+  .stage.active .stage-name, .stage.done .stage-name { color: var(--paper); }
+  .stage-desc { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--slate); line-height: 1.5;}
+
+  .status-line {
+    margin-top: 20px; padding-top: 16px; border-top: 1px solid rgba(142, 202, 230, 0.18);
+    font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--cyan-bright);
+    display: flex; justify-content: space-between; min-height: 16px;
+  }
+  .status-line.idle { color: var(--slate); }
+  .status-line.error { color: var(--red); }
+
+  .results { margin-top: 24px; display: none; }
+  .results.show { display: grid; grid-template-columns: 1.1fr 1fr; gap: 22px; }
+  @media (max-width: 860px) { .results.show { grid-template-columns: 1fr; } }
+
+  .render-frame {
+    border: 1px solid var(--cyan-line); border-radius: var(--radius-md);
+    padding: 8px; background: var(--navy-panel);
+  }
+  .render-frame img { width: 100%; display: block; border-radius: 4px; }
+
+  .bill {
+    background: var(--navy-panel); border: 1px solid rgba(142, 202, 230, 0.18);
+    border-radius: var(--radius-md); padding: 22px;
+  }
+  .bill-title { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+  .bill-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 9px 0; border-bottom: 1px solid rgba(142, 202, 230, 0.1); font-size: 14px;
+  }
+  .bill-row .name { color: var(--paper); }
+  .bill-row .cat { font-family: 'IBM Plex Mono', monospace; font-size: 9.5px; color: var(--slate); margin-left: 8px; }
+  .bill-row .price { font-family: 'IBM Plex Mono', monospace; color: var(--cyan-bright); font-weight: 500; }
+
+  .bill-total {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(142, 202, 230, 0.25);
+  }
+  .bill-total .label { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: var(--slate); }
+  .bill-total .value { font-size: 22px; font-weight: 700; }
+
+  .budget-badge {
+    margin-top: 14px; display: inline-flex; align-items: center; gap: 8px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 11.5px;
+    padding: 7px 12px; border-radius: var(--radius-sm);
+  }
+  .budget-badge.fit { background: rgba(76,175,125,0.15); color: var(--green); border: 1px solid rgba(76,175,125,0.4); }
+  .budget-badge.over { background: rgba(228,98,59,0.15); color: var(--red); border: 1px solid rgba(228,98,59,0.4); }
+
+  .agent-note {
+    margin-top: 16px; font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    color: var(--slate); line-height: 1.6; border-top: 1px solid rgba(142, 202, 230, 0.12); padding-top: 14px;
+  }
+
+  .browse-cta {
+    margin-top: 22px; display: flex; align-items: center; justify-content: space-between;
+    background: linear-gradient(120deg, rgba(255,183,3,0.1), rgba(142,202,230,0.06));
+    border: 1px solid var(--amber); border-radius: var(--radius-md); padding: 20px 24px;
+    grid-column: 1 / -1; gap: 16px; flex-wrap: wrap;
+  }
+  .browse-cta-text .t { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+  .browse-cta-text .d { font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: var(--slate); }
+  .browse-cta a.btn-primary { padding: 12px 22px; font-size: 14px; white-space: nowrap; }
+  .fv-nav-wrap { position:relative; }
+  .fv-nav-toggle { background: var(--navy-panel); color: var(--paper); border:1px solid rgba(142,202,230,0.3); border-radius:6px; padding:8px 12px; font-size:16px; cursor:pointer; line-height:1; font-family: 'Space Grotesk', sans-serif; }
+  .fv-nav-toggle:hover { border-color: var(--cyan-bright); }
+  .fv-nav-menu { position:absolute; top:calc(100% + 6px); right:0; background:var(--navy-panel); border:1px solid rgba(142,202,230,0.3); border-radius:8px; padding:6px; display:none; flex-direction:column; min-width:190px; z-index:1000; box-shadow:0 8px 24px rgba(0,0,0,.45); }
+  .fv-nav-menu.open { display:flex; }
+  .fv-nav-menu a { color:var(--paper); text-decoration:none; padding:9px 10px; border-radius:6px; font-size:13px; white-space:nowrap; font-family: 'Space Grotesk', sans-serif; }
+  .fv-nav-menu a:hover { background: rgba(142,202,230,0.12); }
+  .fv-nav-menu a.current { color:var(--amber); font-weight:700; }
+</style>
+</head>
+<body>
+<div class="grid-backdrop"></div>
+
+<div class="home-nav">
+  <div class="brand-mark" onclick="goHome()">Furni<span>Vision</span></div>
+  <div class="fv-nav-wrap">
+    <button class="fv-nav-toggle" id="fvNavToggle" aria-label="Menu" title="FurniVision menu">☰</button>
+    <div class="fv-nav-menu" id="fvNavMenu">
+      <a href="index.html" data-page="index.html">🏠 Home</a>
+      <a href="catalog-gallery.html" data-page="catalog-gallery.html">🛋️ Browse Catalog</a>
+      <a href="ar-room.html" data-page="ar-room.html">📐 Mark My Room</a>
+      <a href="room-view.html" data-page="room-view.html">🧊 3D Room Preview</a>
+      <a href="ar-design.html" data-page="ar-design.html">📱 AR Placement</a>
+    </div>
+  </div>
+</div>
+
+<!-- ============ SCREEN 1: HOME ============ -->
+<section class="screen" id="screen-home">
+  <div class="home-content">
+    <h1>Design your room with <span class="accent-word">AI</span>. See it in <span class="accent-word">AR</span>.</h1>
+    <p>Four agents reason about your space and budget, then generate a real, priced furniture plan — placeable in your actual room.</p>
+    <button class="btn-primary" onclick="goChoose()">Get Started</button>
+  </div>
+</section>
+
+<!-- ============ SCREEN 2: CHOOSE PATH ============ -->
+<section class="screen fade-in" id="screen-choose" hidden>
+  <div class="choose-wrap">
+    <div class="choose-heading">
+      <h2>What do you want to do?</h2>
+      <p>Two real, independent paths — pick either one.</p>
+    </div>
+    <div class="path-grid">
+      <div class="path-card cyan" onclick="goDesign()">
+        <svg class="path-diagram" viewBox="0 0 200 80" fill="none" stroke="#8ECAE6" stroke-width="2">
+          <rect x="20" y="15" width="70" height="50" rx="3"/>
+          <line x1="30" y1="30" x2="70" y2="30"/>
+          <line x1="30" y1="42" x2="60" y2="42"/>
+          <path d="M105 40 L125 40 M118 33 L125 40 L118 47" stroke-width="2.5"/>
+          <circle cx="160" cy="40" r="24" stroke-dasharray="3 3"/>
+          <path d="M150 40 L157 47 L172 32" stroke-width="2.5"/>
+        </svg>
+        <div class="path-title">Design My Room</div>
+        <div class="path-desc">Enter your room's dimensions and budget — the agent pipeline proposes a style, picks real furniture, and renders a visualization.</div>
+        <div class="path-cta">Start designing →</div>
+      </div>
+      <div class="path-card amber" onclick="location.href='/ar/catalog-gallery.html'">
+        <svg class="path-diagram" viewBox="0 0 200 80" fill="none" stroke="#FFB703" stroke-width="2">
+          <rect x="20" y="20" width="45" height="45" rx="3"/>
+          <rect x="75" y="20" width="45" height="45" rx="3"/>
+          <path d="M135 42 L155 42 M148 35 L155 42 L148 49" stroke-width="2.5"/>
+          <path d="M172 20 L180 20 L180 28 M172 62 L180 62 L180 54" stroke-linecap="round"/>
+          <rect x="178" y="34" width="14" height="18" rx="2"/>
+        </svg>
+        <div class="path-title">Browse &amp; Place in AR</div>
+        <div class="path-desc">Skip straight to the full real catalog — pick any piece and place it in your actual room right now.</div>
+        <div class="path-cta">Open catalog →</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCREEN 3: DESIGN FLOW ============ -->
+<section class="screen fade-in" id="screen-design" hidden>
+  <div class="design-wrap">
+    <div class="grid">
+      <div class="panel">
+        <div class="panel-heading">Room Specification</div>
+        <div class="field-row">
+          <div class="field"><label for="width">Width (m)</label><input type="number" id="width" step="0.1" value="4.2"></div>
+          <div class="field"><label for="length">Length (m)</label><input type="number" id="length" step="0.1" value="3.6"></div>
+          <div class="field"><label for="height">Height (m)</label><input type="number" id="height" step="0.1" value="2.6"></div>
+        </div>
+        <div class="field-row" style="grid-template-columns: 1fr 1fr;">
+          <div class="field">
+            <label for="style">Style preference</label>
+            <select id="style">
+              <option value="scandinavian">Scandinavian</option>
+              <option value="modern">Modern</option>
+              <option value="industrial">Industrial</option>
+              <option value="traditional">Traditional</option>
+            </select>
+          </div>
+          <div class="field"><label for="budget">Budget max (₹)</label><input type="number" id="budget" step="500" value="30000"></div>
+        </div>
+        <div class="field"><label for="notes">Room notes</label><input type="text" id="notes" value="Standard bedroom" placeholder="e.g. Standard bedroom, window on north wall"></div>
+        <div class="field"><label for="imageDescription">Room description (used only when no photo is uploaded)</label><input type="text" id="imageDescription" placeholder="e.g. a cozy modern bedroom with warm wood tones"></div>
+        <div class="field">
+          <label>Room photo (optional — enables structure-preserving redesign)</label>
+          <label class="file-btn" id="fileBtn">
+            <span id="fileLabel">Choose a photo, or leave empty for a fresh render</span>
+            <input type="file" id="photo" accept="image/*">
+          </label>
+        </div>
+        <button class="run-btn" id="runBtn">Run pipeline</button>
+        <div class="hint">Creates a project, runs all four agents, returns a priced furniture plan with a render.</div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-heading">Agent Pipeline</div>
+        <div class="stages" id="stages">
+          <div class="stage" data-stage="0"><div class="stage-dot"></div><div class="stage-body"><div class="stage-name">Room Intelligence</div><div class="stage-desc">Validates dimensions, reads room notes.</div></div></div>
+          <div class="stage" data-stage="1"><div class="stage-dot"></div><div class="stage-body"><div class="stage-name">Design &amp; Material</div><div class="stage-desc">Proposes a style concept and palette.</div></div></div>
+          <div class="stage" data-stage="2"><div class="stage-dot"></div><div class="stage-body"><div class="stage-name">Planning &amp; Optimization</div><div class="stage-desc">Searches the catalog, checks budget, revises ifover.</div></div></div>
+          <div class="stage" data-stage="3"><div class="stage-dot"></div><div class="stage-body"><div class="stage-name">Visualization</div><div class="stage-desc">Renders the plan.</div></div></div>
+        </div>
+        <div class="status-line idle" id="statusLine"><span>Idle — awaiting run</span><span id="elapsed"></span></div>
+      </div>
+    </div>
+
+    <div class="results" id="results">
+      <div class="render-frame"><img id="renderImg" src="" alt="Rendered room design"></div>
+      <div class="bill">
+        <div class="bill-title">Bill of Furniture</div>
+        <div id="billItems"></div>
+        <div class="bill-total"><span class="label">Total</span><span class="value" id="billTotal">—</span></div>
+        <div id="budgetBadge"></div>
+        <div class="agent-note" id="agentNote"></div>
+      </div>
+      <div class="browse-cta">
+        <div class="browse-cta-text">
+          <div class="t">Want to see it for real?</div>
+          <div class="d">Browse the full catalog and place any piece in your room with AR.</div>
+        </div>
+        <a class="btn-primary" href="/ar/catalog-gallery.html">Browse Furniture</a>
+      </div>
+      <div class="browse-cta" id="view3dCta" style="display:none; border-color: var(--cyan-line); background: linear-gradient(120deg, rgba(142,202,230,0.1), rgba(255,183,3,0.06));">
+        <div class="browse-cta-text">
+          <div class="t">See this exact plan in 3D</div>
+          <div class="d">Your real recommended furniture, placed in a room sized to what you entered — rotate and inspect it, or swap any piece.</div>
+        </div>
+        <a class="btn-primary" id="view3dLink" href="#">View in 3D</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.hidden = true);
+    document.getElementById(id).hidden = false;
+  }
+  function goHome() { showScreen('screen-home'); }
+  function goChoose() { showScreen('screen-choose'); }
+  function goDesign() { showScreen('screen-design'); }
+
+  const API_BASE = window.location.origin + "/api/v1";
+
+  const fileInput = document.getElementById('photo');
+  const fileBtn = document.getElementById('fileBtn');
+  const fileLabel = document.getElementById('fileLabel');
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length) {
+      fileLabel.textContent = fileInput.files[0].name;
+      fileBtn.classList.add('has-file');
+    } else {
+      fileLabel.textContent = 'Choose a photo, or leave empty for a fresh render';
+      fileBtn.classList.remove('has-file');
+    }
+  });
+
+  const runBtn = document.getElementById('runBtn');
+  const statusLine = document.getElementById('statusLine');
+  const elapsedEl = document.getElementById('elapsed');
+  const stages = [...document.querySelectorAll('.stage')];
+  const results = document.getElementById('results');
+
+  function setStatus(text, mode) {
+    statusLine.className = 'status-line' + (mode ? ' ' + mode : '');
+    statusLine.firstElementChild.textContent = text;
+  }
+  function resetStages() { stages.forEach(s => s.classList.remove('active', 'done')); }
+
+  let stageTimer = null;
+  function animateStages(totalGuessMs) {
+    resetStages();
+    let i = 0;
+    const stepMs = totalGuessMs / stages.length;
+    stages[0].classList.add('active');
+    stageTimer = setInterval(() => {
+      stages[i].classList.remove('active');
+      stages[i].classList.add('done');
+      i++;
+      if (i < stages.length) stages[i].classList.add('active');
+      else clearInterval(stageTimer);
+    }, stepMs);
+  }
+  function finishStages() {
+    if (stageTimer) clearInterval(stageTimer);
+    stages.forEach(s => { s.classList.remove('active'); s.classList.add('done'); });
+  }
+
+  let startTime, elapsedTimer;
+  function startElapsed() {
+    startTime = Date.now();
+    elapsedTimer = setInterval(() => {
+      elapsedEl.textContent = ((Date.now() - startTime) / 1000).toFixed(1) + 's';
+    }, 100);
+  }
+  function stopElapsed() { clearInterval(elapsedTimer); }
+
+  runBtn.addEventListener('click', async () => {
+    const width_m = parseFloat(document.getElementById('width').value);
+    const length_m = parseFloat(document.getElementById('length').value);
+    const height_m = parseFloat(document.getElementById('height').value);
+    const user_style_pref = document.getElementById('style').value;
+    const budget_max = parseFloat(document.getElementById('budget').value);
+    const notes = document.getElementById('notes').value;
+    const imageDescription = document.getElementById('imageDescription').value;
+    const photoFile = fileInput.files[0] || null;
+
+    runBtn.disabled = true;
+    results.classList.remove('show');
+    setStatus('Creating project…');
+    animateStages(photoFile ? 34000 : 14000);
+    startElapsed();
+
+    try {
+      const projRes = await fetch(`${API_BASE}/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
+        body: JSON.stringify({ name: `Demo Room ${new Date().toLocaleTimeString()}`, budget_max })
+      });
+      if (!projRes.ok) throw new Error('Could not create project (' + projRes.status + ')');
+      const project = await projRes.json();
+
+      if (photoFile) {
+        setStatus('Uploading room photo…');
+        const form = new FormData();
+        form.append('width_m', width_m);
+        form.append('length_m', length_m);
+        form.append('height_m', height_m);
+        form.append('obstacles', '[]');
+        form.append('photo', photoFile);
+        const roomRes = await fetch(`${API_BASE}/projects/${project.id}/rooms`, {
+          method: 'POST',
+          headers: { 'ngrok-skip-browser-warning': 'true' },
+          body: form,
+        });
+        if (!roomRes.ok) throw new Error('Could not upload room photo (' + roomRes.status + ')');
+      }
+
+      setStatus('Running agent pipeline…');
+      const runBody = photoFile
+        ? { user_style_pref, budget_max }
+        : { width_m, length_m, height_m, notes, user_style_pref, budget_max, image_description: imageDescription};
+
+      const runRes = await fetch(`${API_BASE}/projects/${project.id}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'ngrok-skip-browser-warning': 'true' },
+        body: JSON.stringify(runBody)
+      });
+      if (!runRes.ok) throw new Error('Pipeline request failed (' + runRes.status + ')');
+      const runData = await runRes.json();
+      if (runData.status !== 'done') throw new Error(runData.error || 'Pipeline returned an error');
+
+      setStatus('Fetching design detail…');
+      const detailRes = await fetch(`${API_BASE}/projects/${project.id}/designs/${runData.design_version_id}`, {
+        headers: { 'ngrok-skip-browser-warning': 'true' },
+      });
+      const detail = await detailRes.json();
+
+      finishStages();
+      stopElapsed();
+      setStatus('Done', null);
+      statusLine.classList.remove('error');
+
+      renderResults(runData, detail, { project_id: project.id, width_m, length_m, height_m });
+    } catch (err) {
+      finishStages();
+      stopElapsed();
+      setStatus('Error — ' + err.message, 'error');
+      console.error(err);
+    } finally {
+      runBtn.disabled = false;
+    }
+  });
+
+  function renderResults(runData, detail, roomCtx) {
+    document.getElementById('renderImg').src = runData.render_url;
+
+    const items = (detail.furniture_plan && detail.furniture_plan.items) || [];
+    document.getElementById('billItems').innerHTML = items.map(it => `
+      <div class="bill-row">
+        <div><span class="name">${it.name}</span><span class="cat">${it.category}</span></div>
+        <div class="price">₹${Number(it.price).toLocaleString('en-IN')}</div>
+      </div>
+    `).join('');
+
+    document.getElementById('billTotal').textContent = '₹' + Number(runData.total_cost).toLocaleString('en-IN');
+
+    const fits = detail.furniture_plan && detail.furniture_plan.fits_budget;
+    const badge = document.getElementById('budgetBadge');
+    badge.className = 'budget-badge ' + (fits ? 'fit' : 'over');
+    badge.textContent = fits ? '✓ WITHIN BUDGET' : '⚠ OVER BUDGET — revision loop exhausted';
+
+    document.getElementById('agentNote').textContent =
+      `Style: ${detail.design_concepts?.style || '—'}   Revisions used: ${runData.revisions_used}   Version ${runData.version_number}`;
+
+    // Real integration: hand the ACTUAL items this run just produced to
+    // room-view.html via sessionStorage (same-origin, reliable), rather
+    // than a project/design URL that depends on ar_scene_manifest ever
+    // being populated — nothing in the real, confirmed designs.py writes
+    // to that column, only reads it, so that path isn't provably safe yet.
+    // Items here are detail.furniture_plan.items, the SAME dicts
+    // planning_optimization.py's search_catalog returns (name, category,
+    // price, model_asset_url, dimensions) — exactly what room-view.html's
+    // renderPlan() already expects, confirmed against its real shipped code.
+    // Real fix: this used to silently HIDE the button whenever an item was
+    // missing model_asset_url/dimensions — invisible to the person using
+    // the page, with no way to tell "a real bug happened" from "nothing to
+    // show yet". Now the button always appears whenever there's at least
+    // one item, and room-view.html's own validateManifestItems (already
+    // built and tested) is what surfaces a SPECIFIC, visible reason if an
+    // item really is malformed — fail loud on the destination page, never
+    // fail silent on this one.
+    const view3dCta = document.getElementById('view3dCta');
+    const view3dLink = document.getElementById('view3dLink');
+    if (items.length) {
+      try {
+        sessionStorage.setItem('furnivision_pending_room', JSON.stringify({
+          width_m: roomCtx.width_m,
+          depth_m: roomCtx.length_m,
+          ceiling_height_m: roomCtx.height_m,
+          items,
+        }));
+        // Real fix: this URL used to be identical on every single pipeline
+        // run ('room-view.html?from=session', always), which let a phone
+        // browser cache ONE response for it and keep reusing that same
+        // stale page indefinitely — even while the real file on the server,
+        // and the real sessionStorage data, were both completely fresh. A
+        // unique value per run forces every tap to be treated as a genuinely
+        // new page by the browser's cache.
+        view3dLink.href = 'room-view.html?from=session&v=' + Date.now();
+        view3dCta.style.display = 'flex';
+      } catch (e) {
+        // Only a genuine storage failure (quota, private-browsing lockout)
+        // hides the button now — a real, rare case, logged so it's not a
+        // silent mystery either.
+        console.error('Could not stash the design for the 3D view:', e);
+        view3dCta.style.display = 'none';
+      }
+    } else {
+      view3dCta.style.display = 'none';
+    }
+
+    results.classList.add('show');
+    results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+</script>
+<script>
+  (function () {
+    var toggle = document.getElementById('fvNavToggle');
+    var menu = document.getElementById('fvNavMenu');
+    if (!toggle || !menu) return;
+    var here = (location.pathname.split('/').pop() || 'index.html');
+    menu.querySelectorAll('a[data-page]').forEach(function (a) {
+      if (a.dataset.page === here) a.classList.add('current');
+    });
+    toggle.onclick = function (e) { e.stopPropagation(); menu.classList.toggle('open'); };
+    document.addEventListener('click', function (e) {
+      if (!menu.contains(e.target) && e.target !== toggle) menu.classList.remove('open');
+    });
+  })();
+</script>
+</body>
+</html>

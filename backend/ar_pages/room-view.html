@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FurniVision — Room Preview</title>
+<style>
+  :root { --navy:#0B2545; --panel:#102A4C; --line:rgba(142,202,230,.22); --cyan:#8ECAE6; --amber:#FFB703; --paper:#F7F9FB; --slate:#7C93AC; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--navy); color:var(--paper); font-family:-apple-system,"Segoe UI",sans-serif; height:100vh; display:flex; flex-direction:column; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  .spacer { flex:1; }
+  button, label.filebtn { background:var(--panel); color:var(--paper); border:1px solid var(--line); border-radius:6px; padding:8px 12px; font-size:13px; cursor:pointer; }
+  button:hover, label.filebtn:hover { border-color:var(--cyan); }
+  input[type=file] { display:none; }
+  main { flex:1; display:flex; min-height:0; }
+  #viewer { flex:1; position:relative; }
+  #viewer canvas { width:100%; height:100%; display:block; }
+  #side { width:300px; border-left:1px solid var(--line); overflow-y:auto; padding:14px; font-size:13px; }
+  #side h2 { font-size:13px; color:var(--cyan); margin:0 0 6px; }
+  #readout { font-family:ui-monospace,Menlo,monospace; font-size:12px; line-height:1.6; color:var(--cyan); white-space:pre-wrap; margin-bottom:14px; }
+  #totalCost { font-size:15px; font-weight:700; color:var(--amber); margin-bottom:12px; }
+  #sideActions { display:flex; flex-direction:column; gap:8px; margin-bottom:14px; }
+  #sideActions button { width:100%; }
+  button.danger { background:#5a2a2a; border-color:#8a4a4a; color:#fff; }
+  button.danger:hover { border-color:#E4623B; }
+  .unplaced { color:var(--amber); font-size:12px; margin-bottom:4px; }
+  #empty { padding:30px; text-align:center; color:var(--slate); max-width:420px; margin:auto; }
+  #empty code { background:var(--panel); padding:2px 6px; border-radius:4px; }
+  #pickerOverlay { position:absolute; inset:0; background:rgba(11,37,69,.92); display:none; z-index:20; overflow-y:auto; padding:20px; }
+  #pickerOverlay.open { display:block; }
+  #pickerHeader { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+  #pickerHeader h3 { margin:0; font-size:15px; }
+  #pickerGrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:12px; }
+  .pickCard { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; cursor:pointer; text-align:center; }
+  .pickCard:hover { border-color:var(--amber); }
+  .pickCard.current { border-color:var(--cyan); }
+  .pickCard img { width:100%; aspect-ratio:1; object-fit:contain; background:#1a3a5c; border-radius:6px; margin-bottom:6px; }
+  .pickCard .pname { font-size:12px; line-height:1.3; }
+  .pickCard .pprice { font-size:11px; color:var(--slate); margin-top:2px; }
+  #pickHint { position:absolute; left:14px; bottom:14px; background:rgba(11,37,69,.88); border:1px solid var(--line);
+    border-radius:8px; padding:8px 12px; font-size:12px; color:var(--cyan); display:none; z-index:15; }
+
+  .fv-nav-wrap { position:relative; flex-shrink:0; }
+  .fv-nav-toggle { background:var(--panel); color:var(--paper); border:1px solid var(--line); border-radius:6px; padding:8px 12px; font-size:16px; cursor:pointer; line-height:1; }
+  .fv-nav-toggle:hover { border-color:var(--cyan); }
+  .fv-nav-menu { position:absolute; top:calc(100% + 6px); left:0; background:#0B2545; border:1px solid var(--line); border-radius:8px; padding:6px; display:none; flex-direction:column; min-width:190px; z-index:1000; box-shadow:0 8px 24px rgba(0,0,0,.45); }
+  .fv-nav-menu.open { display:flex; }
+  .fv-nav-menu a { color:var(--paper); text-decoration:none; padding:9px 10px; border-radius:6px; font-size:13px; white-space:nowrap; }
+  .fv-nav-menu a:hover { background:var(--panel); }
+  .fv-nav-menu a.current { color:var(--amber); font-weight:700; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FurniVision — Room Preview</h1>
+  <div class="fv-nav-wrap">
+    <button class="fv-nav-toggle" id="fvNavToggle" aria-label="Menu" title="FurniVision menu">☰</button>
+    <div class="fv-nav-menu" id="fvNavMenu">
+      <a href="index.html" data-page="index.html">🏠 Home</a>
+      <a href="catalog-gallery.html" data-page="catalog-gallery.html">🛋️ Browse Catalog</a>
+      <a href="ar-room.html" data-page="ar-room.html">📐 Mark My Room</a>
+      <a href="room-view.html" data-page="room-view.html">🧊 3D Room Preview</a>
+      <a href="ar-design.html" data-page="ar-design.html">📱 AR Placement</a>
+    </div>
+  </div>
+  <span id="designInfo" class="spacer"></span>
+  <input id="fileInput" type="file" accept="application/json" style="display:none;">
+</header>
+<main>
+  <div id="viewer">
+    <div id="pickHint">Tap a piece of furniture to replace it.</div>
+    <div id="pickerOverlay">
+      <div id="pickerHeader">
+        <h3 id="pickerTitle">Replace item</h3>
+        <div style="display:flex;gap:8px;">
+          <button id="pickerRemove" class="danger">Remove this item</button>
+          <button id="pickerClose">Cancel</button>
+        </div>
+      </div>
+      <div id="pickerGrid"></div>
+    </div>
+    <div id="empty">Loading…</div>
+  </div>
+  <div id="side">
+    <h2>Layout</h2>
+    <div id="totalCost"></div>
+    <div id="sideActions" style="display:none;">
+      <button id="btnReset">Reset to recommended</button>
+      <button id="btnSaveLayout">Save edited layout</button>
+    </div>
+    <div id="readout">Load a file to see the plan.</div>
+  </div>
+</main>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+const ORIGIN = window.location.origin;
+const HDR = { "ngrok-skip-browser-warning": "true" };
+
+// <pure>
+function wallsFor(W, D) {
+  return [
+    { id: 'back',  axis: 'x', length: W, normal: { x: 0, z: 1 },  yaw: 0 },
+    { id: 'left',  axis: 'z', length: D, normal: { x: 1, z: 0 },  yaw: Math.PI / 2 },
+    { id: 'right', axis: 'z', length: D, normal: { x: -1, z: 0 }, yaw: -Math.PI / 2 },
+    { id: 'front', axis: 'x', length: W, normal: { x: 0, z: -1 }, yaw: Math.PI },
+  ];
+}
+const WALL_CATEGORIES = ['bed', 'wardrobe', 'bookshelf', 'sofa'];
+const CENTER_CATEGORIES = ['dining_table'];
+const MARGIN_M = 0.1;
+const GAP_M = 0.1;
+
+function planSimpleLayout(roomWidthM, roomDepthM, items) {
+  const walls = wallsFor(roomWidthM, roomDepthM);
+  const used = Object.fromEntries(walls.map(w => [w.id, MARGIN_M]));
+  const placements = [];
+  const unplaced = [];
+
+  const byPriority = [...items].sort((a, b) => {
+    const rank = c => WALL_CATEGORIES.includes(c) ? 0 : CENTER_CATEGORIES.includes(c) ? 1 : 2;
+    return rank(a.category) - rank(b.category);
+  });
+
+  for (const item of byPriority) {
+    const fp = item.footprint;
+    if (CENTER_CATEGORIES.includes(item.category)) {
+      if (fp.w > roomWidthM - 2 * MARGIN_M || fp.d > roomDepthM - 2 * MARGIN_M) {
+        unplaced.push({ item, reason: 'too large for the room, even centred' });
+        continue;
+      }
+      placements.push({ item, x: roomWidthM / 2, z: roomDepthM / 2, yawDeg: 180, wall: 'center' });
+      continue;
+    }
+    if (item.category === 'nightstand') {
+      const bed = placements.find(p => p.item.category === 'bed');
+      if (bed) {
+        const sideX = bed.x + bed.item.footprint.w / 2 + GAP_M + fp.w / 2;
+        if (sideX <= roomWidthM) {
+          placements.push({ item, x: sideX, z: bed.z + fp.d / 2 + MARGIN_M, yawDeg: bed.yawDeg, wall: bed.wall });
+          continue;
+        }
+      }
+    }
+    if (item.category === 'coffee_table') {
+      const sofa = placements.find(p => p.item.category === 'sofa');
+      if (sofa) {
+        const normal = walls.find(w => w.id === sofa.wall).normal;
+        const standoff = sofa.item.footprint.d / 2 + GAP_M + fp.d / 2;
+        placements.push({ item, x: sofa.x + normal.x * standoff, z: sofa.z + normal.z * standoff, yawDeg: sofa.yawDeg, wall: 'floating' });
+        continue;
+      }
+    }
+
+    let placed = false;
+    for (const wall of walls) {
+      const avail = wall.length - used[wall.id] - MARGIN_M;
+      if (fp.w <= avail) {
+        const centerAlong = used[wall.id] + fp.w / 2;
+        const pos = wall.axis === 'x'
+          ? { x: centerAlong, z: wall.id === 'back' ? fp.d / 2 : roomDepthM - fp.d / 2 }
+          : { x: wall.id === 'left' ? fp.d / 2 : roomWidthM - fp.d / 2, z: centerAlong };
+        placements.push({ item, x: pos.x, z: pos.z, yawDeg: wall.yaw * 180 / Math.PI, wall: wall.id });
+        used[wall.id] += fp.w + GAP_M;
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) unplaced.push({ item, reason: 'no wall had enough free length' });
+  }
+  return { placements, unplaced };
+}
+
+function boxOf(root, excluded) {
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  root.traverse(c => { if (c.isMesh && !(excluded && excluded.has(c))) box.union(new THREE.Box3().setFromObject(c)); });
+  return box;
+}
+function sizeOf(root, excluded) {
+  const b = boxOf(root, excluded);
+  return b.isEmpty() ? new THREE.Vector3() : b.getSize(new THREE.Vector3());
+}
+function baseScaleFor(rawSize, dims, category, categoryRules) {
+  const clamp = v => Math.max(1e-4, Math.min(v, 1e4));
+  const t = v => (v || 100) / 100;
+  const W = t(dims && dims.width_cm), D = t(dims && dims.depth_cm), H = t(dims && dims.height_cm);
+  const rule = (categoryRules.categories && categoryRules.categories[category]) || { anchor: "height", envelope: null };
+  let target, raw;
+  if (rule.anchor === "horizontal") { target = Math.max(W, D); raw = Math.max(rawSize.x, rawSize.z); }
+  else { target = H; raw = rawSize.y; }
+  let scale = raw > 0.001 ? clamp(target / raw) : 1;
+  if (rule.envelope) {
+    const [maxLongCm, maxShortCm] = rule.envelope;
+    const w = rawSize.x * scale, d = rawSize.z * scale;
+    const long_ = Math.max(w, d), short_ = Math.min(w, d);
+    const k2 = Math.min(1, long_ > 0 ? (maxLongCm / 100) / long_ : 1, short_ > 0 ? (maxShortCm / 100) / short_ : 1);
+    scale *= k2;
+  }
+  return scale;
+}
+const MAX_DIM_M = 2.6;
+const GROUND_EPS_M = 0.015;
+function collectMeshes(model) { const l = []; model.traverse(c => { if (c.isMesh) l.push(c); }); return l; }
+function buildTemplate(model, item, cal, categoryRules) {
+  cal = cal || {};
+  model.updateMatrixWorld(true);
+  const meshes = collectMeshes(model);
+  (cal.hiddenMeshes || []).forEach(i => { if (meshes[i]) meshes[i].removeFromParent(); });
+  model.updateMatrixWorld(true);
+  const raw = sizeOf(model, null);
+  let base = baseScaleFor(raw, item.dimensions, item.category, categoryRules);
+  model.scale.setScalar(base);
+  const size0 = sizeOf(model, null);
+  const largest = Math.max(size0.x, size0.y, size0.z);
+  if (largest > MAX_DIM_M) base *= MAX_DIM_M / largest;
+  model.scale.setScalar(base * (cal.scaleMul > 0 ? cal.scaleMul : 1));
+  const box = boxOf(model, null);
+  if (!box.isEmpty()) {
+    const c = box.getCenter(new THREE.Vector3());
+    model.position.set(-c.x, -box.min.y - GROUND_EPS_M, -c.z);
+  }
+  const holder = new THREE.Group();
+  holder.add(model);
+  holder.userData.frontYawRad = THREE.MathUtils.degToRad(cal.frontYawDeg || 0);
+  return { holder, raw, base };
+}
+// </pure>
+
+const viewer = document.getElementById('viewer');
+const emptyMsg = document.getElementById('empty');
+const readout = document.getElementById('readout');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0B2545);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 60);
+let controls;
+
+function resize() {
+  const w = viewer.clientWidth, h = viewer.clientHeight;
+  if (!w || !h) return;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(viewer);
+
+let booted = false;
+function bootScene() {
+  if (booted) return;
+  booted = true;
+  emptyMsg.remove();
+  viewer.appendChild(renderer.domElement);
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  resize();
+  renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+}
+
+const roomGroup = new THREE.Group();
+scene.add(roomGroup);
+
+function buildRoomShell(W, D, ceilingH) {
+  roomGroup.clear();
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(W, D),
+    new THREE.MeshStandardMaterial({ color: 0x24456E, roughness: 0.9 })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.set(W / 2, 0, D / 2);
+  roomGroup.add(floor);
+  roomGroup.add(new THREE.GridHelper(Math.max(W, D) + 1, Math.round(Math.max(W, D) + 1), 0x8ECAE6, 0x2a4a72));
+
+  const h = ceilingH || 2.7;
+  const corners = [[0, 0], [W, 0], [W, D], [0, D]];
+  const mat = new THREE.LineBasicMaterial({ color: 0xFFB703 });
+  for (let i = 0; i < 4; i++) {
+    const [x1, z1] = corners[i], [x2, z2] = corners[(i + 1) % 4];
+    const pts = [
+      new THREE.Vector3(x1, 0, z1), new THREE.Vector3(x1, h, z1),
+      new THREE.Vector3(x2, h, z2), new THREE.Vector3(x2, 0, z2), new THREE.Vector3(x1, 0, z1),
+    ];
+    roomGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat));
+  }
+
+  camera.position.set(W * 1.3, Math.max(W, D) * 0.9, D * 1.6);
+  controls.target.set(W / 2, h * 0.3, D / 2);
+  controls.update();
+}
+
+const loader = new GLTFLoader();
+loader.setRequestHeader(HDR);
+function loadModel(url) {
+  return new Promise((resolve, reject) => loader.load(url, g => resolve(g.scene), undefined, reject));
+}
+
+async function loadCategoryRules() {
+  try {
+    const res = await fetch(`${ORIGIN}/ar/category-rules.json?t=${Date.now()}`, { headers: HDR });
+    if (res.ok) return await res.json();
+  } catch (e) { console.warn('category-rules.json not loaded:', e); }
+  return { categories: {} };
+}
+async function loadCalibration() {
+  try {
+    const res = await fetch(`${ORIGIN}/ar/model-calibration.json?t=${Date.now()}`, { headers: HDR });
+    if (res.ok) return await res.json();
+  } catch (e) { console.warn('model-calibration.json not loaded:', e); }
+  return { items: {} };
+}
+
+function footprintMetres(item) {
+  const d = item.dimensions || {};
+  return { w: (d.width_cm || 60) / 100, d: (d.depth_cm || 60) / 100 };
+}
+
+let currentRoom = null;
+let currentItems = [];
+let fullCatalog = null;
+let pickableHolders = [];
+let originalItems = null;
+
+// <pure>
+function totalCost(items) {
+  return items.reduce((sum, it) => sum + (typeof it.price === 'number' ? it.price : 0), 0);
+}
+function removeItemFrom(items, target) {
+  const idx = items.indexOf(target);
+  if (idx === -1) return items;
+  return items.filter((_, i) => i !== idx);
+}
+// </pure>
+
+const totalCostEl = document.getElementById('totalCost');
+const sideActions = document.getElementById('sideActions');
+function updateSidebar() {
+  sideActions.style.display = currentItems.length ? 'flex' : 'none';
+  const cost = totalCost(currentItems);
+  totalCostEl.textContent = currentItems.length ? `Total: ₹${cost.toLocaleString('en-IN')}` : '';
+}
+
+async function renderPlan(data) {
+  bootScene();
+  readout.textContent = 'Loading…';
+  const [categoryRules, calibration] = await Promise.all([loadCategoryRules(), loadCalibration()]);
+
+  currentRoom = { width_m: data.width_m, depth_m: data.depth_m, ceiling_height_m: data.ceiling_height_m };
+  currentItems = (data.items || []).map(it => ({ ...it, footprint: footprintMetres(it) }));
+  if (!originalItems) originalItems = currentItems.map(it => ({ ...it }));
+  await placeFurniture(currentRoom, currentItems, categoryRules, calibration);
+  pickHint.style.display = currentItems.length ? 'block' : 'none';
+  updateSidebar();
+}
+
+let cachedCategoryRules = null, cachedCalibration = null;
+async function placeFurniture(room, items, categoryRules, calibration) {
+  cachedCategoryRules = categoryRules || cachedCategoryRules;
+  cachedCalibration = calibration || cachedCalibration;
+  const W = room.width_m, D = room.depth_m;
+  buildRoomShell(W, D, room.ceiling_height_m);
+
+  const { placements, unplaced } = planSimpleLayout(W, D, items);
+
+  let lines = [`Room: ${W}m × ${D}m (${(W * D).toFixed(1)} m²)`, `Placed ${placements.length}/${items.length} item(s):`];
+  for (const p of placements) lines.push(`  ${p.item.name} — ${p.wall} wall, facing ${p.yawDeg}°`);
+  if (unplaced.length) {
+    lines.push('', `${unplaced.length} item(s) could not be placed:`);
+    for (const u of unplaced) lines.push(`  ${u.item.name} — ${u.reason}`);
+  }
+  readout.textContent = lines.join('\n');
+
+  for (const p of placements) {
+    try {
+      const path = new URL(p.item.model_asset_url, ORIGIN).pathname;
+      const model = await loadModel(ORIGIN + path);
+      const cal = (cachedCalibration.items || {})[p.item.name];
+      const built = buildTemplate(model, p.item, cal, cachedCategoryRules);
+      const holder = built.holder;
+      const yawRad = THREE.MathUtils.degToRad(p.yawDeg) + (holder.userData.frontYawRad || 0);
+      holder.position.set(p.x, 0, p.z);
+      holder.rotation.y = yawRad;
+      holder.traverse(c => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+      holder.userData.isFurnitureItem = true;
+      holder.userData.itemRef = p.item;
+      roomGroup.add(holder);
+      pickableHolders.push(holder);
+    } catch (e) {
+      console.error(`Failed to load "${p.item.name}":`, e);
+    }
+  }
+}
+
+function clearFurnitureOnly() {
+  for (const child of [...roomGroup.children]) {
+    if (child.userData && child.userData.isFurnitureItem) roomGroup.remove(child);
+  }
+  pickableHolders = [];
+}
+async function rebuildFurniture() {
+  clearFurnitureOnly();
+  const { placements, unplaced } = planSimpleLayout(currentRoom.width_m, currentRoom.depth_m, currentItems);
+  let lines = [`Room: ${currentRoom.width_m}m × ${currentRoom.depth_m}m (${(currentRoom.width_m * currentRoom.depth_m).toFixed(1)} m²)`,
+               `Placed ${placements.length}/${currentItems.length} item(s):`];
+  for (const p of placements) lines.push(`  ${p.item.name} — ${p.wall} wall, facing ${p.yawDeg}°`);
+  if (unplaced.length) {
+    lines.push('', `${unplaced.length} item(s) could not be placed:`);
+    for (const u of unplaced) lines.push(`  ${u.item.name} — ${u.reason}`);
+  }
+  readout.textContent = lines.join('\n');
+  for (const p of placements) {
+    try {
+      const path = new URL(p.item.model_asset_url, ORIGIN).pathname;
+      const model = await loadModel(ORIGIN + path);
+      const cal = (cachedCalibration.items || {})[p.item.name];
+      const built = buildTemplate(model, p.item, cal, cachedCategoryRules);
+      const holder = built.holder;
+      const yawRad = THREE.MathUtils.degToRad(p.yawDeg) + (holder.userData.frontYawRad || 0);
+      holder.position.set(p.x, 0, p.z);
+      holder.rotation.y = yawRad;
+      holder.traverse(c => { if (c.isMesh) { c.castShadow = true; c.receiveShadow = true; } });
+      holder.userData.isFurnitureItem = true;
+      holder.userData.itemRef = p.item;
+      roomGroup.add(holder);
+      pickableHolders.push(holder);
+    } catch (e) {
+      console.error(`Failed to load "${p.item.name}":`, e);
+    }
+  }
+  pickHint.style.display = currentItems.length ? 'block' : 'none';
+  updateSidebar();
+}
+
+const API_PREFIX = '/api/v1';
+const urlParams = new URLSearchParams(window.location.search);
+const designInfo = document.getElementById('designInfo');
+
+function roomDimsFromParams() {
+  const w = parseFloat(urlParams.get('width_m'));
+  const d = parseFloat(urlParams.get('depth_m'));
+  const h = parseFloat(urlParams.get('ceiling_height_m'));
+  if (!w || !d) return null;
+  return { width_m: w, depth_m: d, ceiling_height_m: h || 2.7 };
+}
+
+function validateManifestItems(items) {
+  const problems = [];
+  items.forEach((it, i) => {
+    const missing = ['name', 'category', 'model_asset_url', 'dimensions'].filter(k => !(k in it) || it[k] == null);
+    if (missing.length) problems.push(`item ${i} (${it.name || '?'}) is missing: ${missing.join(', ')}`);
+  });
+  return problems;
+}
+
+async function loadFromDesign(projectId, designId) {
+  designInfo.textContent = 'Loading design…';
+  const dims = roomDimsFromParams();
+  if (!dims) {
+    emptyMsg.innerHTML = `This link is missing the room size. Add <code>&width_m=..&depth_m=..</code> to the URL ` +
+      `(the results screen should pass RoomData.width_m / RoomData.length_m here).`;
+    designInfo.textContent = '';
+    return;
+  }
+  let res;
+  try {
+    res = await fetch(`${ORIGIN}${API_PREFIX}/projects/${projectId}/designs/${designId}/ar-manifest`, { headers: HDR });
+  } catch (err) {
+    emptyMsg.textContent = `Could not reach the design: ${err.message || err}`;
+    designInfo.textContent = '';
+    return;
+  }
+  if (!res.ok) {
+    emptyMsg.textContent = `Design fetch failed: ${res.status} ${res.statusText}`;
+    designInfo.textContent = '';
+    return;
+  }
+  const manifest = await res.json();
+  const items = manifest.items || [];
+  if (!items.length) {
+    emptyMsg.textContent = 'This design has no items in its AR manifest yet.';
+    designInfo.textContent = '';
+    return;
+  }
+  const problems = validateManifestItems(items);
+  if (problems.length) {
+    emptyMsg.innerHTML = `The design's items don't have the expected fields — ` +
+      `tell Claude what's shown here so the field names can be mapped correctly:<br><br>` +
+      `<pre style="text-align:left;background:var(--panel);padding:10px;border-radius:6px;font-size:10px;overflow:auto;max-height:200px;">` +
+      problems.join('\n') + '\n\nRaw first item:\n' + JSON.stringify(items[0], null, 2) + `</pre>`;
+    designInfo.textContent = '';
+    return;
+  }
+  designInfo.textContent = `Design ${designId.slice(0, 8)}…`;
+  await renderPlan({ ...dims, items });
+}
+
+async function loadFromSession() {
+  designInfo.textContent = 'Loading your design…';
+  let raw;
+  try { raw = sessionStorage.getItem('furnivision_pending_room'); }
+  catch (e) { emptyMsg.textContent = 'Could not read the stashed design: ' + (e.message || e); designInfo.textContent = ''; return; }
+  if (!raw) {
+    emptyMsg.innerHTML = `No design was handed off. Go back to <a href="index.html" style="color:var(--amber);">Design My Room</a> and run the pipeline first.`;
+    designInfo.textContent = '';
+    return;
+  }
+  let data;
+  try { data = JSON.parse(raw); }
+  catch (e) { emptyMsg.textContent = 'The stashed design is not valid JSON: ' + (e.message || e); designInfo.textContent = ''; return; }
+  if (!data.width_m || !data.depth_m || !Array.isArray(data.items) || !data.items.length) {
+    emptyMsg.textContent = 'The stashed design is missing room size or items — check the result on the Design screen.';
+    designInfo.textContent = '';
+    return;
+  }
+  const problems = validateManifestItems(data.items);
+  if (problems.length) {
+    emptyMsg.innerHTML = `The handed-off items don't have the expected fields — ` +
+      `tell Claude what's shown here:<br><br>` +
+      `<pre style="text-align:left;background:var(--panel);padding:10px;border-radius:6px;font-size:10px;overflow:auto;max-height:200px;">` +
+      problems.join('\n') + '</pre>';
+    designInfo.textContent = '';
+    return;
+  }
+  designInfo.textContent = 'Your recommended design';
+  await renderPlan(data);
+}
+
+const DEFAULT_ROOM = {
+  width_m: 3.5,
+  depth_m: 3.0,
+  ceiling_height_m: 2.7,
+  items: [
+    { name: "Modern Platform Bed", category: "bed", price: 22000, model_asset_url: "/models_3d/modern_platform_bed.glb", dimensions: { width_cm: 160, depth_cm: 200, height_cm: 35 } },
+    { name: "Modern Wardrobe", category: "wardrobe", price: 19000, model_asset_url: "/models_3d/modern_wardrobe.glb", dimensions: { width_cm: 120, depth_cm: 60, height_cm: 210 } },
+    { name: "Modern Nightstand", category: "nightstand", price: 5500, model_asset_url: "/models_3d/modern_nightstand.glb", dimensions: { width_cm: 50, depth_cm: 40, height_cm: 50 } }
+  ]
+};
+
+if (urlParams.get('from') === 'session') {
+  loadFromSession();
+} else if (urlParams.get('project') && urlParams.get('design')) {
+  loadFromDesign(urlParams.get('project'), urlParams.get('design'));
+} else {
+  designInfo.textContent = 'Sample room';
+  renderPlan(DEFAULT_ROOM);
+}
+
+const pickerOverlay = document.getElementById('pickerOverlay');
+const pickerGrid = document.getElementById('pickerGrid');
+const pickerTitle = document.getElementById('pickerTitle');
+const pickHint = document.getElementById('pickHint');
+document.getElementById('pickerClose').onclick = () => pickerOverlay.classList.remove('open');
+let pickerTargetItem = null;
+
+const raycaster = new THREE.Raycaster();
+function findOwningHolder(obj) {
+  while (obj && !(obj.userData && obj.userData.isFurnitureItem)) obj = obj.parent;
+  return obj;
+}
+
+async function ensureFullCatalog() {
+  if (fullCatalog) return fullCatalog;
+  const res = await fetch(`${ORIGIN}/api/v1/catalog/furniture`, { headers: HDR });
+  fullCatalog = (await res.json()).items || [];
+  return fullCatalog;
+}
+function thumbUrlFor(item) {
+  const path = new URL(item.model_asset_url, ORIGIN).pathname;
+  return ORIGIN + path.replace(/\.glb$/i, '.png');
+}
+
+async function openPickerFor(targetItem) {
+  pickerTargetItem = targetItem;
+  pickerTitle.textContent = `Replace "${targetItem.name}"`;
+  pickerGrid.innerHTML = '<div style="color:var(--slate);grid-column:1/-1;">Loading catalog…</div>';
+  pickerOverlay.classList.add('open');
+  const catalog = await ensureFullCatalog();
+  const options = catalog.filter(c => c.category === targetItem.category);
+  pickerGrid.innerHTML = '';
+  for (const opt of options) {
+    const card = document.createElement('div');
+    card.className = 'pickCard' + (opt.name === targetItem.name ? ' current' : '');
+    const img = document.createElement('img');
+    img.src = thumbUrlFor(opt);
+    img.onerror = () => { img.style.display = 'none'; };
+    const name = document.createElement('div');
+    name.className = 'pname';
+    name.textContent = opt.name + (opt.name === targetItem.name ? ' (current)' : '');
+    const price = document.createElement('div');
+    price.className = 'pprice';
+    price.textContent = opt.price ? '₹' + opt.price.toLocaleString('en-IN') : '';
+    card.append(img, name, price);
+    card.onclick = () => replaceItem(targetItem, opt);
+    pickerGrid.appendChild(card);
+  }
+  if (!options.length) pickerGrid.innerHTML = `<div style="color:var(--slate);grid-column:1/-1;">No other "${targetItem.category}" items in the catalog.</div>`;
+}
+
+async function replaceItem(oldItem, newCatalogItem) {
+  pickerOverlay.classList.remove('open');
+  if (newCatalogItem.name === oldItem.name) return;
+  const replacement = { ...newCatalogItem, footprint: footprintMetres(newCatalogItem) };
+  const idx = currentItems.indexOf(oldItem);
+  if (idx === -1) return;
+  currentItems = currentItems.map((it, i) => i === idx ? replacement : it);
+  readout.textContent = 'Replacing…';
+  await rebuildFurniture();
+}
+
+document.getElementById('pickerRemove').onclick = async () => {
+  if (!pickerTargetItem) return;
+  pickerOverlay.classList.remove('open');
+  currentItems = removeItemFrom(currentItems, pickerTargetItem);
+  pickerTargetItem = null;
+  readout.textContent = 'Removing…';
+  await rebuildFurniture();
+};
+
+document.getElementById('btnReset').onclick = async () => {
+  if (!originalItems) return;
+  currentItems = originalItems.map(it => ({ ...it }));
+  readout.textContent = 'Resetting…';
+  await rebuildFurniture();
+};
+
+document.getElementById('btnSaveLayout').onclick = () => {
+  const payload = {
+    width_m: currentRoom.width_m,
+    depth_m: currentRoom.depth_m,
+    ceiling_height_m: currentRoom.ceiling_height_m,
+    items: currentItems.map(({ footprint, ...rest }) => rest),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'edited-layout.json';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function isRealTap(downX, downY, upX, upY, thresholdPx = 6) {
+  return Math.hypot(upX - downX, upY - downY) <= thresholdPx;
+}
+let pointerDownPos = null;
+renderer.domElement.addEventListener('pointerdown', e => { pointerDownPos = { x: e.clientX, y: e.clientY }; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!pointerDownPos) { console.log('[tap] pointerup with no matching pointerdown — ignored'); return; }
+  const moved = Math.hypot(e.clientX - pointerDownPos.x, e.clientY - pointerDownPos.y);
+  if (!isRealTap(pointerDownPos.x, pointerDownPos.y, e.clientX, e.clientY)) {
+    console.log(`[tap] treated as a drag (moved ${moved.toFixed(0)}px) — ignored, picker not opened`);
+    pointerDownPos = null;
+    return;
+  }
+  pointerDownPos = null;
+  if (pickerOverlay.classList.contains('open')) { console.log('[tap] picker already open — background tap ignored'); return; }
+
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(
+    ((e.clientX - rect.left) / rect.width) * 2 - 1,
+    -((e.clientY - rect.top) / rect.height) * 2 + 1
+  );
+  camera.updateMatrixWorld();
+  raycaster.setFromCamera(ndc, camera);
+  const hits = raycaster.intersectObjects(pickableHolders, true);
+  console.log(`[tap] real tap registered, ${hits.length} raycast hit(s) among ${pickableHolders.length} pickable item(s)`);
+  if (!hits.length) return;
+  const holder = findOwningHolder(hits[0].object);
+  console.log('[tap] hit object:', hits[0].object.type, '| resolved holder:', holder ? 'found' : 'NONE',
+    holder ? '| itemRef:' + (holder.userData.itemRef ? holder.userData.itemRef.name : 'MISSING') : '');
+  if (holder && holder.userData.itemRef) openPickerFor(holder.userData.itemRef);
+  else console.log('[tap] hit something, but it has no owning furniture holder — likely hit the floor/grid/wall outline, not an item');
+});
+
+document.getElementById('fileInput').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data.width_m || !data.depth_m || !Array.isArray(data.items)) {
+      readout.textContent = 'That file is missing width_m, depth_m, or items[] — check the expected shape shown on the starting screen.';
+      return;
+    }
+    await renderPlan(data);
+  } catch (err) {
+    readout.textContent = 'Could not read that file: ' + (err.message || err);
+  }
+});
+</script>
+<script>
+  (function () {
+    var toggle = document.getElementById('fvNavToggle');
+    var menu = document.getElementById('fvNavMenu');
+    if (!toggle || !menu) return;
+    var here = (location.pathname.split('/').pop() || 'index.html');
+    menu.querySelectorAll('a[data-page]').forEach(function (a) {
+      if (a.dataset.page === here) a.classList.add('current');
+    });
+    toggle.onclick = function (e) { e.stopPropagation(); menu.classList.toggle('open'); };
+    document.addEventListener('click', function (e) {
+      if (!menu.contains(e.target) && e.target !== toggle) menu.classList.remove('open');
+    });
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "convention": "anchor: which real dimension the model's scale is matched against — 'height' matches the model's vertical (Y) raw size to the recorded height_cm; 'horizontal' matches the larger of the model's two horizontal (X/Z) raw sizes to the larger of recorded width_cm/depth_cm (used for beds and sofas, whose defining real-world measurement is length or width, not height). envelope: [maxLongCm, maxShortCm] — after anchoring, the footprint is shrunk (never enlarged) so neither horizontal side exceeds these bounds. This is a safety cap for badly-proportioned source files, not a routine corrector — most items never hit it.",
+  "categories": {
+    "bed":          { "anchor": "horizontal", "envelope": [230, 215] },
+    "wardrobe":     { "anchor": "height",      "envelope": [220, 90]  },
+    "nightstand":   { "anchor": "height",      "envelope": [65, 60]   },
+    "sofa":         { "anchor": "horizontal", "envelope": [250, 110] },
+    "coffee_table": { "anchor": "height",      "envelope": [130, 75]  },
+    "dining_table": { "anchor": "height",      "envelope": [220, 110] },
+    "dining_chair": { "anchor": "height",      "envelope": [65, 65]   },
+    "bookshelf":    { "anchor": "height",      "envelope": [140, 50]  },
+    "lamp":         { "anchor": "height",      "envelope": [55, 55]   }
+  }
+}

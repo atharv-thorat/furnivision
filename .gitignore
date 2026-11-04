@@ -1,0 +1,45 @@
+# Secrets
+.env
+.env.*
+!.env.example
+!.env.llm.example
+*.jks
+*.keystore
+key.properties
+*firebase-adminsdk*.json
+*service-account*.json
+
+# User data and database dumps
+backend/uploads/
+Sample images/
+furnivision-db-*.sql
+*.dump
+
+# Large or generated files
+Archive.zip
+app_flutter/build/
+app_flutter/android/build/
+app_flutter/.dart_tool/
+app_flutter/android/.gradle/
+app_flutter/ios/Pods/
+__pycache__/
+*.pyc
+
+# 3D models: not published until each model's licence is confirmed
+backend/models_3d/*
+!backend/models_3d/README.md
+
+# Images with an unknown source
+backend/test_photos/
+
+# Old page copies, kept locally
+backend/ar_pages/*.backup*
+backend/ar_pages/*.previous.html
+backend/ar_pages/*-backup.html
+
+# Local notes and files
+CLAUDE.md
+.DS_Store
+.vscode/
+.claude/
+README.previous.md

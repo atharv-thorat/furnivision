@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FurniVision — Browse Catalog</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --navy-deep: #0B2545;
+    --navy-panel: #102A4C;
+    --cyan-line: #8ECAE6;
+    --cyan-bright: #B8E2F2;
+    --paper: #F7F9FB;
+    --slate: #7C93AC;
+    --amber: #FFB703;
+    --green: #4CAF7D;
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--navy-deep);
+    color: var(--paper);
+    font-family: 'Space Grotesk', sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    background: rgba(11,37,69,0.92);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid rgba(142,202,230,0.22);
+    padding: 16px 18px;
+  }
+  .brand { font-weight: 700; font-size: 18px; }
+  .brand span { color: var(--amber); }
+  .sub { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: var(--slate); margin-top: 3px; letter-spacing: 0.06em; }
+
+  .filters {
+    display: flex; gap: 8px; overflow-x: auto; margin-top: 14px; padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .filter-chip {
+    flex: 0 0 auto;
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+    background: rgba(142,202,230,0.08); color: var(--cyan-bright);
+    border: 1px solid rgba(142,202,230,0.3); border-radius: 20px;
+    padding: 7px 14px; cursor: pointer; white-space: nowrap;
+  }
+  .filter-chip.active { background: var(--amber); color: var(--navy-deep); border-color: var(--amber); font-weight: 600; }
+
+  #statusLine {
+    padding: 14px 18px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; color: var(--slate);
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    padding: 4px 18px 100px;
+  }
+  @media (min-width: 640px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+  @media (min-width: 960px) { .grid { grid-template-columns: repeat(4, 1fr); } }
+
+  .card {
+    background: var(--navy-panel);
+    border: 1px solid rgba(142,202,230,0.2);
+    border-radius: var(--radius);
+    overflow: hidden;
+    cursor: pointer;
+    transition: transform 0.12s, border-color 0.12s;
+  }
+  .card:active { transform: scale(0.97); border-color: var(--amber); }
+
+  .card-icon {
+    aspect-ratio: 1 / 1;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .card-icon img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card-icon svg { width: 100%; height: 100%; padding: 18%; box-sizing: border-box; }
+  .card-icon-fallback { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  .card-icon-fallback svg { width: 100%; height: 100%; padding: 18%; box-sizing: border-box; }
+
+  .card-body { padding: 10px 12px 12px; }
+  .card-name { font-size: 13px; font-weight: 600; line-height: 1.3; margin-bottom: 4px; }
+  .card-meta {
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: 'IBM Plex Mono', monospace; font-size: 10.5px;
+  }
+  .card-style { color: var(--slate); text-transform: uppercase; letter-spacing: 0.04em; }
+  .card-price { color: var(--cyan-bright); font-weight: 600; }
+
+  .empty-state {
+    text-align: center; padding: 60px 20px; color: var(--slate);
+    font-family: 'IBM Plex Mono', monospace; font-size: 12.5px; grid-column: 1 / -1;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">Furni<span>Vision</span> — Browse Catalog</div>
+    <div class="sub">All real catalog items · tap any card to place it in AR</div>
+    <div class="filters" id="filters"></div>
+  </header>
+
+  <div id="statusLine">Fetching real catalog…</div>
+  <div class="grid" id="grid"></div>
+
+  <script>
+    // Real, permanent backend origin — same one serving everything else.
+    const ORIGIN = window.location.origin;
+    const CATALOG_URL = `${ORIGIN}/api/v1/catalog/furniture`;
+
+    const STYLE_COLORS = {
+      scandinavian: '#B8E2F2',
+      modern: '#8ECAE6',
+      industrial: '#E4623B',
+      traditional: '#C68B3C',
+      budget: '#4CAF7D',
+    };
+
+    // Clean, real, category-distinct SVG icons — reliable (no hotlinked
+    // images that can break or get blocked), zero copyright risk, and
+    // color-tinted per style so items are still visually distinguishable
+    // at a glance in the grid.
+    const CATEGORY_ICONS = {
+      bed: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><rect x="10" y="45" width="80" height="30" rx="4"/><rect x="10" y="30" width="24" height="20" rx="3"/><rect x="66" y="30" width="24" height="20" rx="3"/><line x1="10" y1="75" x2="10" y2="85"/><line x1="90" y1="75" x2="90" y2="85"/></svg>`,
+      wardrobe: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><rect x="18" y="10" width="64" height="80" rx="3"/><line x1="50" y1="10" x2="50" y2="90"/><circle cx="44" cy="50" r="2.2" fill="${c}"/><circle cx="56" cy="50" r="2.2" fill="${c}"/></svg>`,
+      nightstand: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><rect x="25" y="25" width="50" height="55" rx="3"/><line x1="25" y1="45" x2="75" y2="45"/><line x1="25" y1="62" x2="75" y2="62"/><circle cx="50" cy="35" r="1.8" fill="${c}"/></svg>`,
+      sofa: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><rect x="12" y="45" width="76" height="30" rx="6"/><path d="M12 55 V30 a6 6 0 0 1 6-6 h10 a6 6 0 0 1 6 6 v15"/><path d="M88 55 V30 a6 6 0 0 0-6-6 H72 a6 6 0 0 0-6 6 v15"/><line x1="20" y1="75" x2="20" y2="84"/><line x1="80" y1="75" x2="80" y2="84"/></svg>`,
+      coffee_table: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><ellipse cx="50" cy="35" rx="38" ry="10"/><line x1="20" y1="40" x2="20" y2="75"/><line x1="80" y1="40" x2="80" y2="75"/></svg>`,
+      dining_table: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><rect x="10" y="25" width="80" height="10" rx="2"/><line x1="18" y1="35" x2="18" y2="80"/><line x1="82" y1="35" x2="82" y2="80"/></svg>`,
+      dining_chair: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><rect x="30" y="10" width="40" height="35" rx="3"/><rect x="25" y="45" width="50" height="8" rx="2"/><line x1="30" y1="53" x2="26" y2="88"/><line x1="70" y1="53" x2="74" y2="88"/></svg>`,
+      bookshelf: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><rect x="15" y="10" width="70" height="80" rx="3"/><line x1="15" y1="32" x2="85" y2="32"/><line x1="15" y1="54" x2="85" y2="54"/><line x1="15" y1="76" x2="85" y2="76"/></svg>`,
+      lamp: (c) => `<svg viewBox="0 0 100 100" fill="none" stroke="${c}" stroke-width="3.5" stroke-linejoin="round"><path d="M32 20 L68 20 L58 42 L42 42 Z"/><line x1="50" y1="42" x2="50" y2="82"/><line x1="35" y1="88" x2="65" y2="88"/></svg>`,
+    };
+    function iconFor(category, color) {
+      const fn = CATEGORY_ICONS[category] || CATEGORY_ICONS.bed;
+      return fn(color);
+    }
+
+    // Real fix: every real .glb in models_3d/ has a matching real
+    // screenshot with the same base filename, already served publicly
+    // through the backend's existing /models_3d static mount — no new
+    // backend change needed. Derive it directly from the catalog's own
+    // model_asset_url rather than guessing a separate path.
+    function screenshotUrlFor(modelAssetUrl) {
+      try {
+        const u = new URL(modelAssetUrl);
+        const pngPath = u.pathname.replace(/\.glb$/i, '.png');
+        return ORIGIN + pngPath;
+      } catch {
+        return null;
+      }
+    }
+
+    async function fetchWithTimeout(url, timeoutMs = 8000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, {
+          signal: controller.signal,
+          headers: { "ngrok-skip-browser-warning": "true" },
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    let allItems = [];
+    let activeStyle = 'all';
+
+    async function loadCatalog(attempt = 1) {
+      const statusLine = document.getElementById('statusLine');
+      statusLine.textContent = attempt > 1 ? `Fetching real catalog… (retry ${attempt})` : 'Fetching real catalog…';
+      try {
+        const res = await fetchWithTimeout(CATALOG_URL, 8000);
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const data = await res.json();
+        allItems = data.items || [];
+        statusLine.textContent = `${allItems.length} real catalog items.`;
+        renderFilters();
+        renderGrid();
+      } catch (err) {
+        console.error(`Catalog fetch failed (attempt ${attempt}):`, err);
+        if (attempt < 3) {
+          statusLine.textContent = `Fetch failed — retrying (${attempt}/3)…`;
+          setTimeout(() => loadCatalog(attempt + 1), 1500);
+          return;
+        }
+        statusLine.textContent = 'Failed to load the catalog after 3 attempts. Reload the page to try again.';
+      }
+    }
+
+    function renderFilters() {
+      const styles = ['all', ...new Set(allItems.map(i => i.style))];
+      const filters = document.getElementById('filters');
+      filters.innerHTML = styles.map(s => `
+        <div class="filter-chip ${s === activeStyle ? 'active' : ''}" data-style="${s}">
+          ${s === 'all' ? 'All Styles' : s.charAt(0).toUpperCase() + s.slice(1)}
+        </div>
+      `).join('');
+      filters.querySelectorAll('.filter-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+          activeStyle = chip.dataset.style;
+          renderFilters();
+          renderGrid();
+        });
+      });
+    }
+
+    function renderGrid() {
+      const grid = document.getElementById('grid');
+      const items = activeStyle === 'all' ? allItems : allItems.filter(i => i.style === activeStyle);
+
+      if (!items.length) {
+        grid.innerHTML = `<div class="empty-state">No items match this filter.</div>`;
+        return;
+      }
+
+      grid.innerHTML = items.map((item, idx) => {
+        const color = STYLE_COLORS[item.style] || '#8ECAE6';
+        const shotUrl = screenshotUrlFor(item.model_asset_url);
+        const iconSvg = iconFor(item.category, color);
+        // Real photo first; if it 404s (a screenshot genuinely missing
+        // for this one item), swap to the reliable category icon instead
+        // of showing a broken image.
+        const imgHtml = shotUrl
+          ? `<img src="${shotUrl}" alt="${item.name}" loading="lazy"
+               onerror="this.replaceWith(Object.assign(document.createElement('div'), {className:'card-icon-fallback', innerHTML: ${JSON.stringify(iconSvg)}}))">`
+          : iconSvg;
+        return `
+          <div class="card" data-idx="${idx}" data-style="${item.style}">
+            <div class="card-icon" style="background: ${color}14;">${imgHtml}</div>
+            <div class="card-body">
+              <div class="card-name">${item.name}</div>
+              <div class="card-meta">
+                <span class="card-style">${item.style}</span>
+                <span class="card-price">${item.price ? '₹' + item.price.toLocaleString('en-IN') : ''}</span>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      grid.querySelectorAll('.card').forEach(card => {
+        card.addEventListener('click', () => {
+          const filteredItems = activeStyle === 'all' ? allItems : allItems.filter(i => i.style === activeStyle);
+          const item = filteredItems[parseInt(card.dataset.idx, 10)];
+          openInAr(item);
+        });
+      });
+    }
+
+    function openInAr(item) {
+      // Real integration: jump straight into the one, fully-fixed AR
+      // engine (the same file used for design-scoped runs), with this
+      // item pre-selected — reusing the exact, already-tested catalog
+      // fetch + placement flow, just pre-picking this item by name.
+      const url = `${ORIGIN}/ar/ar-design.html?preselect=${encodeURIComponent(item.name)}`;
+      window.location.href = url;
+    }
+
+    loadCatalog();
+  </script>
+</body>
+</html>

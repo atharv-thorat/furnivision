@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>FurniVision — AR: Your Design</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: -apple-system, sans-serif; background: #000; }
+    #info {
+      position: absolute; top: 12px; left: 12px; right: 12px;
+      background: rgba(0,0,0,0.65); color: #fff; padding: 10px 14px;
+      border-radius: 6px; font-size: 13px; z-index: 10; line-height: 1.5;
+      pointer-events: none;
+    }
+    #retryBtn {
+      position: absolute; top: 56px; left: 12px; z-index: 10;
+      background: rgba(142,202,230,0.85); color: #0B2545; border: none;
+      border-radius: 6px; padding: 8px 14px; font-size: 12px; font-weight: 600; display: none;
+    }
+    #clearBtn {
+      position: absolute; top: 110px; right: 12px; z-index: 10;
+      background: rgba(228,98,59,0.85); color: #fff; border: none;
+      border-radius: 6px; padding: 8px 14px; font-size: 12px; display: none;
+    }
+    #catalogBar {
+      position: absolute; left: 0; right: 0; bottom: 0; z-index: 10;
+      background: rgba(0,0,0,0.75); padding: 10px 8px;
+      display: flex; gap: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    }
+    .catalog-item {
+      flex: 0 0 auto; background: rgba(255,255,255,0.08); color: #fff;
+      border: 1px solid rgba(255,255,255,0.2); border-radius: 8px;
+      padding: 8px 12px; font-size: 11px; text-align: left; min-width: 120px;
+      font-family: -apple-system, sans-serif;
+    }
+    .catalog-item.selected { border-color: #ffb703; background: rgba(255,183,3,0.18); }
+    .catalog-item .name { display: block; font-weight: 600; margin-bottom: 2px; }
+    .catalog-item .price { display: block; color: #8ECAE6; font-size: 10px; }
+    .catalog-item .status { display: block; color: #4CAF7D; font-size: 9px; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <div id="info">Fetching your recommended design…</div>
+  <div id="debugPanel" style="position:absolute; top:60px; left:12px; right:12px; z-index:10; background:rgba(0,0,0,0.7); color:#8ECAE6; padding:8px 12px; border-radius:6px; font-size:10.5px; font-family:monospace; line-height:1.6; white-space:pre-wrap; pointer-events:none;"></div>
+  <button id="retryBtn">Retry</button>
+  <button id="clearBtn">Clear Scene</button>
+  <div id="catalogBar"></div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+    import { ARButton } from "three/addons/webxr/ARButton.js";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+    import * as SkeletonUtils from "three/addons/utils/SkeletonUtils.js";
+
+    const info = document.getElementById('info');
+    const debugPanel = document.getElementById('debugPanel');
+    const retryBtn = document.getElementById('retryBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const catalogBar = document.getElementById('catalogBar');
+
+    if (!navigator.xr) {
+      info.textContent = "WebXR not available. This needs Chrome on an ARCore-supported Android phone.";
+      throw new Error("navigator.xr is undefined");
+    }
+
+    // Today's real, permanent backend origin — same one serving this page.
+    const TUNNEL_ORIGIN = window.location.origin;
+
+    // Design-scoping: if opened with ?project=X&design=Y, load only that
+    // run's real, recommended, budget-checked items via /ar-manifest —
+    // not the full generic 45-item catalog.
+    const urlParams = new URLSearchParams(window.location.search);
+    const scopedProjectId = urlParams.get('project');
+    const scopedDesignId = urlParams.get('design');
+    const isDesignScoped = !!(scopedProjectId && scopedDesignId);
+    // Real integration: the visual gallery links here with a specific
+    // item name pre-picked, so tapping a card jumps straight into AR
+    // with that item ready — no need to find it again in the bottom bar.
+    const preselectName = urlParams.get('preselect');
+    const DEBUG = urlParams.get('debug') === '1';
+    if (!DEBUG) debugPanel.style.display = 'none';
+    const CATALOG_API_URL = `${TUNNEL_ORIGIN}/api/v1/catalog/furniture`;
+    const MANIFEST_API_URL = isDesignScoped
+      ? `${TUNNEL_ORIGIN}/api/v1/projects/${scopedProjectId}/designs/${scopedDesignId}/ar-manifest`
+      : null;
+
+    function toTunnelUrl(rawUrl) {
+      try {
+        const u = new URL(rawUrl);
+        return TUNNEL_ORIGIN + u.pathname;
+      } catch {
+        return rawUrl;
+      }
+    }
+
+    // ---- Per-model calibration (made with model-qa.html) ---------------------
+    //   frontYawDeg  : model.rotation.y that turns the model's front toward +Z
+    //   scaleMul     : per-item multiplier on the uniform base scale
+    //   hiddenMeshes : mesh indices (traversal order) removed before measuring/rendering
+    // If /ar/model-calibration.json is missing, every item falls back to defaults.
+    let calibration = { items: {} };
+    async function loadCalibration() {
+      try {
+        const res = await fetchWithTimeout(`${TUNNEL_ORIGIN}/ar/model-calibration.json?t=${Date.now()}`, 8000);
+        if (res.ok) calibration = await res.json();
+        else console.warn('model-calibration.json:', res.status);
+      } catch (err) { console.warn('model-calibration.json not loaded:', err); }
+    }
+
+    // <pure>
+    // three.js Box3.setFromObject ignores .visible, so a "hidden" mesh is still
+    // measured. Stray meshes are therefore removed from the scene graph, and
+    // parent matrices are updated before any per-mesh measuring.
+    function boxOf(root, excluded) {
+      root.updateMatrixWorld(true);
+      const box = new THREE.Box3();
+      root.traverse(c => {
+        if (c.isMesh && !(excluded && excluded.has(c))) box.union(new THREE.Box3().setFromObject(c));
+      });
+      return box;
+    }
+    function sizeOf(root, excluded) {
+      const b = boxOf(root, excluded);
+      return b.isEmpty() ? new THREE.Vector3() : b.getSize(new THREE.Vector3());
+    }
+    // Real fix (Build Plan step 2): scaling to whichever raw axis happened
+    // to be longest overall was fragile — a lamp with a long diagonal arm,
+    // or a dining table modelled as a flat slab, could scale to a wildly
+    // wrong size even though the math was internally consistent. This
+    // anchors each category on the ONE real-world dimension that actually
+    // defines it (height for most furniture; the larger horizontal side
+    // for beds and sofas, whose defining measurement is length/width, not
+    // height), using /ar/category-rules.json. A generous footprint
+    // envelope then shrinks (never enlarges) the result as a safety cap —
+    // this is a rare safety net for badly-proportioned source files, not a
+    // routine corrector, and it cannot fix a fundamentally malformed mesh
+    // (e.g. a "table" raw-modelled as a near-flat slab) any more than
+    // uniform scaling ever could; those genuinely need the asset replaced.
+    let categoryRules = { categories: {} };
+    async function loadCategoryRules() {
+      try {
+        const res = await fetchWithTimeout(`${TUNNEL_ORIGIN}/ar/category-rules.json?t=${Date.now()}`, 8000);
+        if (res.ok) categoryRules = await res.json();
+        else console.warn('category-rules.json:', res.status);
+      } catch (err) { console.warn('category-rules.json not loaded:', err); }
+    }
+    function baseScaleFor(rawSize, dims, category) {
+      const clamp = v => Math.max(1e-4, Math.min(v, 1e4));
+      const t = v => (v || 100) / 100;
+      const W = t(dims && dims.width_cm), D = t(dims && dims.depth_cm), H = t(dims && dims.height_cm);
+      const rule = (categoryRules.categories && categoryRules.categories[category]) || { anchor: "height", envelope: null };
+      let target, raw;
+      if (rule.anchor === "horizontal") { target = Math.max(W, D); raw = Math.max(rawSize.x, rawSize.z); }
+      else { target = H; raw = rawSize.y; }
+      let scale = raw > 0.001 ? clamp(target / raw) : 1;
+      if (rule.envelope) {
+        const [maxLongCm, maxShortCm] = rule.envelope;
+        const w = rawSize.x * scale, d = rawSize.z * scale;
+        const long_ = Math.max(w, d), short_ = Math.min(w, d);
+        const k2 = Math.min(1,
+          long_ > 0 ? (maxLongCm / 100) / long_ : 1,
+          short_ > 0 ? (maxShortCm / 100) / short_ : 1
+        );
+        scale *= k2;
+      }
+      return scale;
+    }
+    const MAX_DIM_M = 2.6;
+    const GROUND_EPS_M = 0.015;
+    function collectMeshes(model) {
+      const list = [];
+      model.traverse(c => { if (c.isMesh) list.push(c); });
+      return list;
+    }
+    // Same maths as model-qa.html, so what you approved there is what appears here.
+    // Returns a holder group whose origin is the footprint centre on the floor,
+    // with the scaled model inside it (scale lives on the child, never on the holder).
+    function buildTemplate(model, item, cal) {
+      cal = cal || {};
+      model.updateMatrixWorld(true);
+      const meshes = collectMeshes(model);
+      (cal.hiddenMeshes || []).forEach(i => { if (meshes[i]) meshes[i].removeFromParent(); });
+      model.updateMatrixWorld(true);
+      const raw = sizeOf(model, null);
+      let base = baseScaleFor(raw, item.dimensions, item.category);
+      model.scale.setScalar(base);
+      const size0 = sizeOf(model, null);
+      const largest = Math.max(size0.x, size0.y, size0.z);
+      if (largest > MAX_DIM_M) base *= MAX_DIM_M / largest;
+      model.scale.setScalar(base * (cal.scaleMul > 0 ? cal.scaleMul : 1));
+      const box = boxOf(model, null);
+      if (!box.isEmpty()) {
+        const c = box.getCenter(new THREE.Vector3());
+        model.position.set(-c.x, -box.min.y - GROUND_EPS_M, -c.z);
+      }
+      const holder = new THREE.Group();
+      holder.add(model);
+      holder.userData.frontYawRad = THREE.MathUtils.degToRad(cal.frontYawDeg || 0);
+      return { holder, raw, base, removed: (cal.hiddenMeshes || []).length };
+    }
+    // Yaw that turns the model's front toward the viewer at the moment of placement.
+    function facingYaw(viewerPos, hitPos, frontYawRad) {
+      if (!viewerPos) return frontYawRad;
+      const dx = viewerPos.x - hitPos.x, dz = viewerPos.z - hitPos.z;
+      if (Math.hypot(dx, dz) < 1e-3) return frontYawRad;
+      return Math.atan2(dx, dz) + frontYawRad;
+    }
+    // </pure>
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.xr.enabled = true;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    document.body.appendChild(renderer.domElement);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.4));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.1);
+    dirLight.position.set(1, 2, 1);
+    scene.add(dirLight);
+
+    const reticleGeo = new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI / 2);
+    const reticleMat = new THREE.MeshBasicMaterial({ color: 0xffb703 });
+    const reticle = new THREE.Mesh(reticleGeo, reticleMat);
+    reticle.matrixAutoUpdate = false;
+    reticle.visible = false;
+    scene.add(reticle);
+
+    const modelCache = new Map();
+    let catalogItems = [];
+    let selectedItem = null;
+    const loader = new GLTFLoader();
+    // ngrok's free tier shows a one-time browser-warning interstitial
+    // before allowing access — this header is ngrok's own documented
+    // bypass for programmatic requests like model downloads.
+    loader.setRequestHeader({ "ngrok-skip-browser-warning": "true" });
+
+    async function fetchWithTimeout(url, timeoutMs = 8000) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, {
+          signal: controller.signal,
+          headers: { "ngrok-skip-browser-warning": "true" },
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    async function fetchCatalog(attempt = 1) {
+      retryBtn.style.display = 'none';
+      const fetchUrl = isDesignScoped ? MANIFEST_API_URL : CATALOG_API_URL;
+      info.textContent = attempt > 1
+        ? `Fetching ${isDesignScoped ? 'your design' : 'real catalog'}… (retry ${attempt})`
+        : isDesignScoped ? 'Fetching your recommended design…' : 'Fetching real catalog…';
+      try {
+        const res = await fetchWithTimeout(fetchUrl, 8000);
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const data = await res.json();
+        catalogItems = data.items || [];
+        renderCatalogBar();
+        info.textContent = isDesignScoped
+          ? `Loaded ${catalogItems.length} item(s) from your actual recommended design. Pick one below, then START AR.`
+          : `Loaded ${catalogItems.length} real catalog items. Pick one below, then START AR.`;
+      } catch (err) {
+        const isTimeout = err.name === 'AbortError';
+        console.error(`Catalog fetch failed (attempt ${attempt}, timeout=${isTimeout}):`, err);
+        if (attempt < 3) {
+          info.textContent = isTimeout
+            ? `Request timed out — retrying automatically (${attempt}/3)…`
+            : `Fetch failed — retrying automatically (${attempt}/3)…`;
+          setTimeout(() => fetchCatalog(attempt + 1), 1500);
+          return;
+        }
+        info.textContent = isTimeout
+          ? "Timed out after 3 attempts — the tunnel connection may genuinely be down right now. Tap Retry."
+          : "Failed to fetch after 3 attempts. Tap Retry below.";
+        retryBtn.style.display = 'block';
+      }
+    }
+    retryBtn.addEventListener('click', () => fetchCatalog(1));
+
+    function renderCatalogBar() {
+      catalogBar.innerHTML = '';
+      catalogItems.forEach(item => {
+        const btn = document.createElement('button');
+        btn.className = 'catalog-item';
+        btn.innerHTML = `
+          <span class="name">${item.name}</span>
+          <span class="price">${item.price ? '₹' + item.price.toLocaleString('en-IN') : ''}</span>
+          <span class="status"></span>
+        `;
+        btn.addEventListener('click', () => selectItem(item, btn));
+        catalogBar.appendChild(btn);
+
+        // Real integration: if the gallery sent us here with a specific
+        // item pre-picked, select it automatically once its real button
+        // exists — the person shouldn't have to find it again by hand.
+        if (preselectName && item.name === preselectName) {
+          selectItem(item, btn);
+        }
+      });
+    }
+
+    // Real fix: for screen-based AR, WebXR's 'select' event fires on ANY
+    // screen tap — including taps on these catalog buttons. Without this,
+    // selecting an item can simultaneously register as an in-scene
+    // placement tap, using whatever the reticle happened to be pointing
+    // at in that instant.
+    let suppressPlacementUntil = 0;
+    const SELECT_SUPPRESS_MS = 500;
+
+    async function selectItem(item, btnEl) {
+      suppressPlacementUntil = performance.now() + SELECT_SUPPRESS_MS;
+      document.querySelectorAll('.catalog-item').forEach(el => el.classList.remove('selected'));
+      btnEl.classList.add('selected');
+
+      const url = toTunnelUrl(item.model_asset_url);
+      await calibrationReady;
+
+      if (modelCache.has(url)) {
+        selectedItem = { item, template: modelCache.get(url) };
+        info.textContent = `"${item.name}" ready. Scan for a floor and tap to place.`;
+        return;
+      }
+
+      const loadStartTime = performance.now();
+      info.textContent = `Loading "${item.name}"…`;
+      btnEl.querySelector('.status').textContent = 'loading…';
+      // Real fix: without this, a slow download (a full wardrobe over a
+      // phone connection) looks frozen — the banner text never changes
+      // for many seconds. This visibly confirms it's still working.
+      const progressInterval = setInterval(() => {
+        const secs = Math.round((performance.now() - loadStartTime) / 1000);
+        info.textContent = `Loading "${item.name}"… (${secs}s)`;
+      }, 2000);
+
+      // Real fix: larger multi-part models (a wardrobe with doors, a
+      // full bed frame) genuinely take longer to download than a small
+      // nightstand, especially over a phone's connection through a free
+      // tunnel. 15s was too tight and could silently time out mid-demo
+      // with only small, easy-to-miss catalog-button text as the sign.
+      const LOAD_TIMEOUT_MS = 30000;
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearInterval(progressInterval);
+        btnEl.querySelector('.status').textContent = 'timed out';
+        info.textContent = `"${item.name}" timed out loading — tap it again to retry.`;
+      }, LOAD_TIMEOUT_MS);
+
+      loader.load(
+        url,
+        (gltf) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          clearInterval(progressInterval);
+
+          const model = gltf.scene;
+          const cal = (calibration.items || {})[item.name];
+          const built = buildTemplate(model, item, cal);
+          const template = built.holder;
+          template.traverse(child => {
+            if (child.isMesh) { child.castShadow = true; child.receiveShadow = true; }
+          });
+          const d = item.dimensions || {};
+          debugPanel.textContent =
+            `Last loaded: "${item.name}" (${item.category})\n` +
+            `raw size: ${built.raw.x.toFixed(2)} × ${built.raw.y.toFixed(2)} × ${built.raw.z.toFixed(2)}   base scale ${built.base.toPrecision(3)}\n` +
+            `recorded: ${d.width_cm}×${d.depth_cm}×${d.height_cm}cm   calibration: ${cal ? 'yes' : 'none'}   meshes removed: ${built.removed}`;
+
+          modelCache.set(url, template);
+          selectedItem = { item, template };
+          btnEl.querySelector('.status').textContent = '✓ loaded';
+          info.textContent = `"${item.name}" ready. Scan for a floor and tap to place.`;
+        },
+        undefined,
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeoutId);
+          clearInterval(progressInterval);
+          console.error(`Failed to load "${item.name}":`, err);
+          btnEl.querySelector('.status').textContent = 'failed';
+          info.textContent = `Failed to load "${item.name}" — check the console.`;
+        }
+      );
+    }
+
+    const calibrationReady = Promise.all([loadCalibration(), loadCategoryRules()]);
+    fetchCatalog();
+
+    const arButton = ARButton.createButton(renderer, { requiredFeatures: ['hit-test', 'anchors'] });
+    // Real fix: default ARButton position overlaps the catalog bar at
+    // the bottom — moved up, clear of it.
+    arButton.style.bottom = 'auto';
+    arButton.style.top = '150px';
+    document.body.appendChild(arButton);
+
+    let hitTestSource = null;
+    let hitTestSourceRequested = false;
+    let lastHitPose = null;
+    const placedObjects = []; // { anchor, instance, yaw, itemName }
+
+    let floorHeightY = null;
+    const FLOOR_TOLERANCE_M = 0.12;
+    let placementRequested = false;
+
+    clearBtn.addEventListener('click', () => {
+      placedObjects.forEach(p => scene.remove(p.instance));
+      placedObjects.length = 0;
+      floorHeightY = null;
+      info.textContent = "Scene cleared, floor height reset.";
+    });
+
+    renderer.xr.addEventListener('sessionstart', () => {
+      clearBtn.style.display = 'block';
+      info.textContent = selectedItem
+        ? `Move your phone to scan for a floor, then tap to place "${selectedItem.item.name}".`
+        : "Pick a catalog item below first, then scan for a floor.";
+    });
+
+    renderer.xr.addEventListener('sessionend', () => {
+      clearBtn.style.display = 'none';
+      reticle.visible = false;
+      lastHitPose = null;
+      hitTestSource = null;
+      hitTestSourceRequested = false;
+      floorHeightY = null;
+      placementRequested = false;
+      // Real fix: previously this only cleared the anchor reference,
+      // leaving the object itself still in the scene — meaning the
+      // render loop (which keeps running outside an AR session) kept
+      // drawing it every frame, frozen in place, against an empty black
+      // background with no camera feed. A frozen position also has no
+      // real meaning once you're outside that session's live camera
+      // projection. Removing it from the scene entirely on exit is the
+      // honest choice — re-enter AR and place it again for a fresh,
+      // correctly anchored placement.
+      for (const p of placedObjects) {
+        scene.remove(p.instance);
+      }
+      placedObjects.length = 0;
+    });
+
+    const controller = renderer.xr.getController(0);
+    controller.addEventListener('select', () => {
+      if (performance.now() < suppressPlacementUntil) {
+        console.log("Ignored a 'select' event — likely a catalog-button tap bleeding through.");
+        return;
+      }
+      if (!selectedItem) {
+        info.textContent = "Pick a catalog item from the list below first.";
+        return;
+      }
+      placementRequested = true;
+    });
+    scene.add(controller);
+
+    function arResize() {
+      const w = window.innerWidth, h = window.innerHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', arResize);
+    arResize();
+
+    renderer.setAnimationLoop((timestamp, frame) => {
+      if (frame) {
+        try {
+        const referenceSpace = renderer.xr.getReferenceSpace();
+        const session = renderer.xr.getSession();
+
+        if (!hitTestSourceRequested) {
+          hitTestSourceRequested = true;
+          try {
+            session.requestReferenceSpace('viewer').then((viewerSpace) => {
+              session.requestHitTestSource({ space: viewerSpace }).then((source) => {
+                hitTestSource = source;
+              }).catch(err => console.error("requestHitTestSource failed:", err));
+            }).catch(err => console.error("requestReferenceSpace('viewer') failed:", err));
+          } catch (err) {
+            console.error("Hit-test setup threw synchronously:", err);
+          }
+        }
+
+        if (hitTestSource) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          let foundFloor = false;
+
+          for (const hit of hitTestResults) {
+            const pose = hit.getPose(referenceSpace);
+            const hitMatrix = new THREE.Matrix4().fromArray(pose.transform.matrix);
+            const surfaceNormal = new THREE.Vector3(0, 1, 0).transformDirection(hitMatrix);
+            const isHorizontal = surfaceNormal.y > 0.85;
+            const hitY = pose.transform.position.y;
+            const isAtFloorHeight = floorHeightY === null || Math.abs(hitY - floorHeightY) < FLOOR_TOLERANCE_M;
+
+            if (isHorizontal && isAtFloorHeight) {
+              reticle.visible = true;
+              reticle.matrix.fromArray(pose.transform.matrix);
+              lastHitPose = pose;
+              foundFloor = true;
+              break;
+            }
+          }
+          if (!foundFloor) { reticle.visible = false; lastHitPose = null; }
+
+          debugPanel.textContent =
+            `hits this frame: ${hitTestResults.length}\n` +
+            `floor locked: ${floorHeightY !== null ? floorHeightY.toFixed(3) + 'm' : 'not yet'}\n` +
+            `reticle: ${reticle.visible ? `x=${lastHitPose.transform.position.x.toFixed(3)} y=${lastHitPose.transform.position.y.toFixed(3)} z=${lastHitPose.transform.position.z.toFixed(3)}` : 'no valid floor hit'}\n` +
+            `placed objects: ${placedObjects.length}`;
+
+          // Real fix: the anchor is created HERE, synchronously, inside
+          // this live frame — never from a decoupled async handler
+          // reading a stale, possibly-inactive past frame's result.
+          if (placementRequested) {
+            placementRequested = false;
+            if (reticle.visible && lastHitPose) {
+              const instance = SkeletonUtils.clone(selectedItem.template);
+              instance.matrixAutoUpdate = false;
+              const itemName = selectedItem.item.name;
+              // Turn the model's calibrated front toward whoever is placing it.
+              const viewerPose = frame.getViewerPose(referenceSpace);
+              const yaw = facingYaw(
+                viewerPose ? viewerPose.transform.position : null,
+                lastHitPose.transform.position,
+                instance.userData.frontYawRad || 0
+              );
+              // Real fix: previously, every tap added a brand-new copy,
+              // with nothing ever removing an old one. Repeated taps
+              // (trying to "fix" a placement) silently accumulated
+              // multiple overlapping objects, which looked exactly like
+              // chaotic, meaningless placement — because it genuinely
+              // was several separate objects, not one misbehaving one.
+              // Placing the same item again now replaces its previous
+              // instance instead of stacking another copy on top.
+              for (let i = placedObjects.length - 1; i >= 0; i--) {
+                if (placedObjects[i].itemName === itemName) {
+                  scene.remove(placedObjects[i].instance);
+                  placedObjects.splice(i, 1);
+                }
+              }
+              const placementDebugPos = lastHitPose.transform.position;
+              console.log(`[PLACE] "${itemName}" anchor requested at x=${placementDebugPos.x.toFixed(3)} y=${placementDebugPos.y.toFixed(3)} z=${placementDebugPos.z.toFixed(3)}`);
+
+              frame.createAnchor(lastHitPose.transform, referenceSpace).then(anchor => {
+                if (floorHeightY === null) floorHeightY = lastHitPose.transform.position.y;
+                scene.add(instance);
+                placedObjects.push({ anchor, instance, yaw, itemName });
+                info.textContent = `Placed "${itemName}" (${placedObjects.length} total). Pick another item or tap again.`;
+              }).catch(err => {
+                console.warn("Anchor creation failed, using static placement as fallback:", err);
+                instance.matrixAutoUpdate = true;
+                instance.position.setFromMatrixPosition(reticle.matrix);
+                instance.rotation.y = yaw;
+                scene.add(instance);
+                placedObjects.push({ anchor: null, instance, yaw, itemName });
+                info.textContent = `Placed "${itemName}" (static fallback).`;
+              });
+            } else {
+              info.textContent = "No floor detected at that spot yet — point at the actual ground.";
+            }
+          }
+        }
+
+        let trackedDebugLines = [];
+        for (const p of placedObjects) {
+          if (!p.anchor) continue;
+          const anchorPose = frame.getPose(p.anchor.anchorSpace, referenceSpace);
+          if (anchorPose) {
+            const m = new THREE.Matrix4().fromArray(anchorPose.transform.matrix);
+            const pos = new THREE.Vector3();
+            m.decompose(pos, new THREE.Quaternion(), new THREE.Vector3());
+            const rotationQuat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), p.yaw);
+            const finalMatrix = new THREE.Matrix4().compose(
+              new THREE.Vector3(pos.x, pos.y, pos.z),
+              rotationQuat,
+              new THREE.Vector3(1, 1, 1)
+            );
+            p.instance.matrix.copy(finalMatrix);
+            trackedDebugLines.push(
+              `${p.itemName}: x=${pos.x.toFixed(3)} y=${pos.y.toFixed(3)} z=${pos.z.toFixed(3)} yaw=${(p.yaw * 180 / Math.PI).toFixed(0)}°`
+            );
+          } else {
+            trackedDebugLines.push(`${p.itemName}: NO VALID ANCHOR POSE THIS FRAME`);
+          }
+        }
+        if (trackedDebugLines.length) {
+          debugPanel.textContent += `\n--- tracked ---\n` + trackedDebugLines.join('\n');
+        }
+        } catch (err) {
+          console.error("AR frame processing error (rendering continues regardless):", err);
+          info.textContent = `Placement error: ${err.message || err} — try again or pick a different item.`;
+        }
+      }
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>

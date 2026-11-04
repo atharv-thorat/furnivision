@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FurniVision — Mark Your Room</title>
+<style>
+  :root { --navy:#0B2545; --panel:#102A4C; --line:rgba(142,202,230,.3); --cyan:#8ECAE6; --amber:#FFB703; --red:#E4623B; --paper:#F7F9FB; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:#000; color:var(--paper); font-family:-apple-system,"Segoe UI",sans-serif; overflow:hidden; }
+  #info { position:fixed; top:calc(10px + env(safe-area-inset-top,0px)); left:10px; right:10px; z-index:10;
+    background:rgba(11,37,69,.88); border:1px solid var(--line); border-radius:10px; padding:10px 14px; font-size:14px; }
+  #stats { position:fixed; top:calc(68px + env(safe-area-inset-top,0px)); left:10px; right:10px; z-index:10;
+    background:rgba(11,37,69,.82); border:1px solid var(--line); border-radius:10px; padding:8px 14px;
+    font-size:12px; font-family:ui-monospace,Menlo,monospace; white-space:pre-wrap; display:none; }
+  #controls { position:fixed; bottom:calc(14px + env(safe-area-inset-bottom,0px)); left:10px; right:10px; z-index:10;
+    display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  button { background:var(--panel); color:var(--paper); border:1px solid var(--line); border-radius:8px;
+    padding:10px 14px; font-size:14px; }
+  button.primary { background:var(--amber); color:var(--navy); border-color:var(--amber); font-weight:700; }
+  button.danger { background:var(--red); border-color:var(--red); color:#fff; }
+  button:disabled { opacity:.4; }
+  #ceilingRow { position:fixed; bottom:calc(64px + env(safe-area-inset-bottom,0px)); left:10px; right:10px; z-index:10;
+    display:flex; gap:8px; justify-content:center; align-items:center; font-size:13px; }
+  #ceilingRow input { width:70px; background:var(--panel); color:var(--paper); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  #debugPanel { position:fixed; bottom:calc(120px + env(safe-area-inset-bottom,0px)); left:10px; right:10px; z-index:10;
+    background:rgba(0,0,0,.75); color:#8ECAE6; font-family:ui-monospace,Menlo,monospace; font-size:11px;
+    padding:8px; border-radius:8px; white-space:pre-wrap; max-height:30vh; overflow:auto; display:none; }
+</style>
+</head>
+<body>
+<div id="info">Point your phone at the floor and tap each corner of the room, in order around the edge.</div>
+<div id="stats"></div>
+<div id="debugPanel"></div>
+<div id="ceilingRow">
+  <label for="ceiling">Ceiling height (m)</label>
+  <input id="ceiling" type="number" step="0.05" min="1.8" max="5" value="2.7">
+</div>
+<div id="controls">
+  <button id="btnUndo" disabled>Undo last corner</button>
+  <button id="btnClear" disabled>Clear all</button>
+  <button id="btnClose" class="primary" disabled>Close room</button>
+  <button id="btnSave" class="primary" disabled>Save room</button>
+</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { ARButton } from "three/addons/webxr/ARButton.js";
+
+const urlParams = new URLSearchParams(window.location.search);
+const DEBUG = urlParams.get('debug') === '1';
+const debugPanel = document.getElementById('debugPanel');
+if (DEBUG) debugPanel.style.display = 'block';
+
+// <pure>
+// Polygon math for the tapped room outline. Points are {x, z} in metres,
+// in AR world space, listed in the order they were tapped (NOT closed —
+// the last point implicitly connects back to the first). These are pure
+// functions with no DOM/THREE dependency so they can be unit-tested on
+// their own.
+function shoelaceArea(points) {
+  if (points.length < 3) return 0;
+  let sum = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i], b = points[(i + 1) % points.length];
+    sum += a.x * b.z - b.x * a.z;
+  }
+  return Math.abs(sum) / 2;
+}
+function wallLengths(points) {
+  if (points.length < 2) return [];
+  const out = [];
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i], b = points[(i + 1) % points.length];
+    out.push(Math.hypot(b.x - a.x, b.z - a.z));
+  }
+  return out;
+}
+function isDegenerate(points, minWallM = 0.3) {
+  return wallLengths(points).some(len => len < minWallM);
+}
+function selfIntersects(points) {
+  const n = points.length;
+  if (n < 4) return false;
+  const seg = i => [points[i], points[(i + 1) % n]];
+  const ccw = (a, b, c) => (c.z - a.z) * (b.x - a.x) > (b.z - a.z) * (c.x - a.x);
+  const intersect = (p1, p2, p3, p4) =>
+    ccw(p1, p3, p4) !== ccw(p2, p3, p4) && ccw(p1, p2, p3) !== ccw(p1, p2, p4);
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (Math.abs(i - j) <= 1 || (i === 0 && j === n - 1)) continue;
+      const [a, b] = seg(i), [c, d] = seg(j);
+      if (intersect(a, b, c, d)) return true;
+    }
+  }
+  return false;
+}
+// </pure>
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.2));
+
+const reticleGeo = new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI / 2);
+const reticle = new THREE.Mesh(reticleGeo, new THREE.MeshBasicMaterial({ color: 0xFFB703 }));
+reticle.matrixAutoUpdate = false;
+reticle.visible = false;
+scene.add(reticle);
+
+// Real fix (same reasoning as ar-design.html): request plane-detection as
+// OPTIONAL. Support is inconsistent across devices/browsers; the manual
+// tap-the-corners flow below is the real, dependable path regardless of
+// whether this is available. This session is purely for marking the room,
+// so it does not request 'anchors' at all — there is nothing here that
+// needs to persist position across a session boundary.
+const arButton = ARButton.createButton(renderer, {
+  requiredFeatures: ['hit-test'],
+  optionalFeatures: ['plane-detection', 'dom-overlay'],
+  domOverlay: { root: document.body },
+});
+document.body.appendChild(arButton);
+
+let hitTestSource = null;
+let hitTestSourceRequested = false;
+let lastHitPose = null;
+let floorHeightY = null;
+const FLOOR_TOLERANCE_M = 0.12;
+
+// ---- the room outline being built ----
+const corners = []; // [{x, z, y}] — y is the floor height this point was tapped at
+const markerGroup = new THREE.Group();
+const lineGroup = new THREE.Group();
+scene.add(markerGroup, lineGroup);
+let closed = false;
+
+function markerMesh() {
+  return new THREE.Mesh(
+    new THREE.SphereGeometry(0.035, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0x4CAF7D })
+  );
+}
+function redrawLines() {
+  lineGroup.clear();
+  if (corners.length < 2) return;
+  const pts = corners.map(c => new THREE.Vector3(c.x, c.y + 0.01, c.z));
+  if (closed) pts.push(pts[0].clone());
+  const geo = new THREE.BufferGeometry().setFromPoints(pts);
+  lineGroup.add(new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0x8ECAE6, linewidth: 2 })));
+}
+
+const info = document.getElementById('info');
+const statsEl = document.getElementById('stats');
+const btnUndo = document.getElementById('btnUndo');
+const btnClear = document.getElementById('btnClear');
+const btnClose = document.getElementById('btnClose');
+const btnSave = document.getElementById('btnSave');
+const ceilingInput = document.getElementById('ceiling');
+
+function refreshUI() {
+  btnUndo.disabled = corners.length === 0 || closed;
+  btnClear.disabled = corners.length === 0;
+  btnClose.disabled = corners.length < 3 || closed;
+  btnSave.disabled = !closed;
+
+  if (closed) {
+    const pts = corners.map(c => ({ x: c.x, z: c.z }));
+    const area = shoelaceArea(pts);
+    const walls = wallLengths(pts);
+    statsEl.style.display = 'block';
+    statsEl.textContent =
+      `${corners.length} corners, ${walls.length} walls, floor area ${area.toFixed(1)} m²\n` +
+      walls.map((w, i) => `  wall ${i + 1}: ${w.toFixed(2)} m`).join('\n');
+    info.textContent = 'Room closed. Check the shape looks right, then Save — or Clear to restart.';
+  } else if (corners.length === 0) {
+    statsEl.style.display = 'none';
+    info.textContent = 'Point your phone at the floor and tap each corner of the room, in order around the edge.';
+  } else {
+    statsEl.style.display = 'block';
+    const pts = corners.map(c => ({ x: c.x, z: c.z }));
+    statsEl.textContent = `${corners.length} corner(s) placed so far.` +
+      (corners.length >= 2 ? `  (${wallLengths(pts).slice(0, -1).map(w => w.toFixed(2)).join(' m, ')} m)` : '');
+    info.textContent = corners.length < 3
+      ? 'Tap the next corner.'
+      : 'Tap the next corner, or press "Close room" if you\'ve got them all.';
+  }
+}
+
+function addCorner(x, y, z) {
+  if (closed) return;
+  if (corners.length > 0) {
+    const last = corners[corners.length - 1];
+    const dist = Math.hypot(x - last.x, z - last.z);
+    if (dist < 0.3) {
+      info.textContent = 'That tap looks too close to the last corner — move further before tapping again.';
+      return;
+    }
+  }
+  corners.push({ x, y, z });
+  const m = markerMesh();
+  m.position.set(x, y + 0.01, z);
+  markerGroup.add(m);
+  redrawLines();
+  refreshUI();
+}
+
+btnUndo.onclick = () => {
+  if (closed || !corners.length) return;
+  corners.pop();
+  markerGroup.remove(markerGroup.children[markerGroup.children.length - 1]);
+  redrawLines();
+  refreshUI();
+};
+btnClear.onclick = () => {
+  corners.length = 0;
+  closed = false;
+  markerGroup.clear();
+  lineGroup.clear();
+  floorHeightY = null;
+  refreshUI();
+};
+btnClose.onclick = () => {
+  if (corners.length < 3) return;
+  const pts = corners.map(c => ({ x: c.x, z: c.z }));
+  if (isDegenerate(pts)) {
+    info.textContent = 'Two corners are too close together — Undo and retap that one further apart.';
+    return;
+  }
+  if (selfIntersects(pts)) {
+    info.textContent = 'These corners cross over each other — the outline needs to go around the room in order, without crossing itself. Clear and retry.';
+    return;
+  }
+  closed = true;
+  redrawLines();
+  refreshUI();
+};
+
+// ---- Save: exports the room as JSON for now. The real backend route
+// (rooms.py) is not yet wired into this page — once it exists, this
+// handler POSTs to it instead of downloading. Kept as a clearly-labelled
+// placeholder rather than guessing at an endpoint shape that might not
+// match the real route. ----
+btnSave.onclick = () => {
+  const pts = corners.map(c => ({ x: +c.x.toFixed(3), z: +c.z.toFixed(3) }));
+  const payload = {
+    polygon: pts,
+    wall_lengths_m: wallLengths(pts).map(n => +n.toFixed(3)),
+    floor_area_m2: +shoelaceArea(pts).toFixed(2),
+    ceiling_height_m: parseFloat(ceilingInput.value) || 2.7,
+    captured_at: new Date().toISOString(),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'room.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  info.textContent = 'Saved room.json. (Backend save isn\'t wired up yet — this is a local download for now.)';
+};
+
+const controller = renderer.xr.getController(0);
+controller.addEventListener('select', () => {
+  if (!reticle.visible || !lastHitPose) {
+    info.textContent = 'No floor detected there yet — point at the actual ground and try again.';
+    return;
+  }
+  const p = lastHitPose.transform.position;
+  addCorner(p.x, p.y, p.z);
+});
+scene.add(controller);
+
+renderer.xr.addEventListener('sessionstart', () => {
+  hitTestSource = null;
+  hitTestSourceRequested = false;
+  refreshUI();
+});
+renderer.xr.addEventListener('sessionend', () => {
+  reticle.visible = false;
+  lastHitPose = null;
+  hitTestSource = null;
+  hitTestSourceRequested = false;
+});
+
+function arResize() {
+  renderer.setSize(window.innerWidth, window.innerHeight, false);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', arResize);
+
+renderer.setAnimationLoop((timestamp, frame) => {
+  if (frame) {
+    try {
+      const referenceSpace = renderer.xr.getReferenceSpace();
+      const session = renderer.xr.getSession();
+
+      if (!hitTestSourceRequested) {
+        hitTestSourceRequested = true;
+        session.requestReferenceSpace('viewer').then(viewerSpace => {
+          session.requestHitTestSource({ space: viewerSpace }).then(source => { hitTestSource = source; })
+            .catch(err => console.error('requestHitTestSource failed:', err));
+        }).catch(err => console.error("requestReferenceSpace('viewer') failed:", err));
+      }
+
+      if (hitTestSource) {
+        const hitTestResults = frame.getHitTestResults(hitTestSource);
+        let foundFloor = false;
+        for (const hit of hitTestResults) {
+          const pose = hit.getPose(referenceSpace);
+          const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+          const normal = new THREE.Vector3(0, 1, 0).transformDirection(m);
+          const isHorizontal = normal.y > 0.85;
+          const hitY = pose.transform.position.y;
+          const atFloorHeight = floorHeightY === null || Math.abs(hitY - floorHeightY) < FLOOR_TOLERANCE_M;
+          if (isHorizontal && atFloorHeight) {
+            reticle.visible = true;
+            reticle.matrix.fromArray(pose.transform.matrix);
+            lastHitPose = pose;
+            if (floorHeightY === null) floorHeightY = hitY;
+            foundFloor = true;
+            break;
+          }
+        }
+        if (!foundFloor) { reticle.visible = false; lastHitPose = null; }
+      }
+
+      // ---- 5a: plane-detection probe (debug only). Requested as an
+      // optional feature above; whether frame.detectedPlanes exists and
+      // is populated depends entirely on the device/browser, which is
+      // exactly what this is here to find out before any snap-to-plane
+      // logic gets built on top of it. ----
+      if (DEBUG) {
+        let planeLine = 'plane-detection: not supported on this session';
+        if (frame.detectedPlanes) {
+          let h = 0, v = 0, other = 0;
+          frame.detectedPlanes.forEach(p => {
+            if (p.orientation === 'horizontal') h++;
+            else if (p.orientation === 'vertical') v++;
+            else other++;
+          });
+          planeLine = `detectedPlanes: ${frame.detectedPlanes.size} total (horizontal=${h} vertical=${v} unclassified=${other})`;
+        }
+        debugPanel.textContent =
+          `hits this frame: ${hitTestSource ? frame.getHitTestResults(hitTestSource).length : 'n/a'}\n` +
+          `floor locked: ${floorHeightY !== null ? floorHeightY.toFixed(3) + 'm' : 'not yet'}\n` +
+          `corners placed: ${corners.length}   closed: ${closed}\n` +
+          planeLine;
+      }
+    } catch (err) {
+      console.error('AR room-marking frame error (rendering continues regardless):', err);
+      info.textContent = `Error: ${err.message || err} — try again.`;
+    }
+  }
+  renderer.render(scene, camera);
+});
+arResize();
+refreshUI();
+</script>
+</body>
+</html>

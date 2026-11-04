@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FurniVision — Model QA</title>
+<style>
+  :root { --navy:#0B2545; --panel:#102A4C; --line:rgba(142,202,230,.22); --cyan:#8ECAE6; --amber:#FFB703; --green:#4CAF7D; --red:#E4623B; --paper:#F7F9FB; --slate:#7C93AC; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--navy); color:var(--paper); font-family:-apple-system,"Segoe UI",sans-serif; height:100vh; display:flex; flex-direction:column; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; }
+  #progress { color:var(--cyan); font-size:13px; }
+  .spacer { flex:1; }
+  button { background:var(--panel); color:var(--paper); border:1px solid var(--line); border-radius:6px; padding:8px 12px; font-size:13px; cursor:pointer; }
+  button:hover { border-color:var(--cyan); }
+  button.primary { background:var(--amber); color:var(--navy); border-color:var(--amber); font-weight:700; }
+  main { flex:1; display:grid; grid-template-columns:300px 1fr; min-height:0; }
+  @media (max-width:900px) { main { grid-template-columns:1fr; grid-template-rows:200px 1fr; } }
+  #list { overflow-y:auto; border-right:1px solid var(--line); }
+  .row { padding:9px 14px; border-bottom:1px solid var(--line); cursor:pointer; font-size:13px; display:flex; justify-content:space-between; gap:8px; }
+  .row.active { background:rgba(255,183,3,.14); }
+  .row .cat { color:var(--slate); font-size:11px; }
+  .badges { white-space:nowrap; font-size:12px; }
+  #stage { display:flex; flex-direction:column; min-height:0; }
+  #viewer { flex:1; min-height:280px; position:relative; }
+  #viewer canvas { width:100%; height:100%; display:block; }
+  #controls { padding:12px 16px; border-top:1px solid var(--line); display:grid; gap:10px; }
+  .btnrow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  #readout { font-family:ui-monospace,Menlo,monospace; font-size:12px; line-height:1.6; color:var(--cyan); white-space:pre-wrap; }
+  #hint { color:var(--amber); font-size:12px; min-height:16px; white-space:pre-wrap; }
+  label.inline { font-size:12px; color:var(--slate); display:flex; align-items:center; gap:6px; }
+  input[type=number] { width:80px; background:var(--navy); color:var(--paper); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+  .note { font-size:11px; color:var(--slate); }
+</style>
+</head>
+<body>
+<header>
+  <h1>FurniVision — Model QA</h1>
+  <span id="progress">loading…</span>
+  <span class="spacer"></span>
+  <button id="btnMissing">Download missing thumbnails</button>
+  <button id="btnCopy">Copy JSON</button>
+  <button id="btnDownload" class="primary">Download JSON</button>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="stage">
+    <div id="viewer"></div>
+    <div id="controls">
+      <div id="readout">Pick an item on the left.</div>
+      <div id="hint"></div>
+      <div class="btnrow">
+        <button id="btnCCW">⟲ 90° (E)</button>
+        <button id="btnCW">⟳ 90° (R)</button>
+        <button id="btnFlip">Flip 180° (F)</button>
+        <label class="inline">scale × <input id="scaleMul" type="number" step="0.05" min="0.01" value="1"></label>
+        <label class="inline"><input id="dropLargest" type="checkbox"> drop largest mesh</label>
+        <label class="inline"><input id="cleanup" type="checkbox"> needs cleanup</label>
+        <button id="btnThumb">Save thumbnail</button>
+        <button id="btnConfirm" class="primary">Confirm &amp; next (Enter)</button>
+      </div>
+      <div class="note">Turn the model until its FRONT points along the red arrow (toward you in the default view). The amber box is the recorded real size. ← → switch item.</div>
+    </div>
+  </div>
+</main>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+
+const ORIGIN = window.location.origin;
+const HDR = { "ngrok-skip-browser-warning": "true" };
+const STORE_KEY = "furnivision.calibration.v1";
+const MAX_DIM_M = 2.6;
+
+// <pure>
+// Bounding box of every mesh under `root` except `excluded`. three.js's own
+// Box3.setFromObject ignores .visible, so hiding a mesh does not remove it
+// from a box — the exclusion has to be done by hand. Parent matrices are
+// updated first, otherwise parent scale/rotation is silently ignored.
+function boxOf(root, excluded) {
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3();
+  root.traverse(c => {
+    if (c.isMesh && c !== excluded) box.union(new THREE.Box3().setFromObject(c));
+  });
+  return box;
+}
+function sizeOf(root, excluded) {
+  const b = boxOf(root, excluded);
+  return b.isEmpty() ? new THREE.Vector3() : b.getSize(new THREE.Vector3());
+}
+// How far a box's proportions are from the recorded real proportions
+// (both sorted longest to shortest, normalised by the longest side).
+function proportionError(size, dims) {
+  if (!dims) return 0;
+  const real = [dims.width_cm, dims.depth_cm, dims.height_cm].map(v => v || 0);
+  if (real.some(v => v <= 0)) return 0;
+  const a = [size.x, size.y, size.z].sort((p, q) => q - p);
+  const b = real.slice().sort((p, q) => q - p);
+  if (a[0] <= 0) return 99;
+  let err = 0;
+  for (let i = 1; i < 3; i++) {
+    err += Math.abs(Math.log(Math.max(a[i], 1e-6) / a[0]) - Math.log(b[i] / b[0]));
+  }
+  return err;
+}
+// Suggest dropping the largest mesh only when the whole model's proportions
+// are clearly wrong AND the model without that mesh matches the recorded
+// proportions much better (a body with a small handle is NOT dropped: without
+// the body, the handle alone matches worse).
+function suggestDrop(model, largest, dims) {
+  if (!largest || !dims) return false;
+  const full = sizeOf(model, null);
+  const without = sizeOf(model, largest);
+  if (without.x + without.y + without.z === 0) return false;
+  const eFull = proportionError(full, dims);
+  const eWithout = proportionError(without, dims);
+  return eFull > 0.5 && eWithout < eFull * 0.5;
+}
+function baseScaleFor(rawSize, dims) {
+  const t = v => (v || 100) / 100;
+  const maxReal = Math.max(t(dims && dims.width_cm), t(dims && dims.depth_cm), t(dims && dims.height_cm));
+  const maxRaw = Math.max(rawSize.x, rawSize.y, rawSize.z);
+  return maxRaw > 0.001 ? Math.max(1e-4, Math.min(maxReal / maxRaw, 1e4)) : 1;
+}
+// A footprint that matches the recorded width/depth only after a 90° turn.
+function yawHint(size, dims) {
+  if (!dims || !dims.width_cm || !dims.depth_cm || !size.x || !size.z) return "";
+  const ratio = Math.max(dims.width_cm, dims.depth_cm) / Math.min(dims.width_cm, dims.depth_cm);
+  if (ratio < 1.25) return "";
+  const have = Math.log(size.x / size.z);
+  const errAsIs = Math.abs(have - Math.log(dims.width_cm / dims.depth_cm));
+  const errSwap = Math.abs(have - Math.log(dims.depth_cm / dims.width_cm));
+  return errSwap + 0.15 < errAsIs ? "Footprint looks 90° off (width and depth swapped): try ⟲ or ⟳." : "";
+}
+// </pure>
+
+const $ = id => document.getElementById(id);
+const deg = d => THREE.MathUtils.degToRad(d);
+
+let items = [];
+let calib = {};
+try { calib = JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch { calib = {}; }
+let currentIdx = -1, current = null, selectToken = 0;
+const loaded = new Map();
+
+// ---------- three.js scene ----------
+const viewer = $("viewer");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+viewer.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14335A);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(35, 1, 0.05, 60);
+camera.position.set(0, 1.5, 4.2);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.6, 0);
+controls.enableDamping = true;
+
+const helpers = new THREE.Group();
+scene.add(helpers);
+helpers.add(new THREE.GridHelper(6, 12, 0x8ECAE6, 0x2a4a72));
+helpers.add(new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0.01, 0), 1.6, 0xE4623B, 0.3, 0.2));
+let dimsBox = null;
+
+const pivot = new THREE.Group();
+scene.add(pivot);
+
+function resize() {
+  const w = viewer.clientWidth, h = viewer.clientHeight;
+  if (!w || !h) return;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(viewer);
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+
+// ---------- state ----------
+function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(calib)); } catch {} }
+function getState(name) { return calib[name]; }
+function ensureState(item, entry) {
+  if (!calib[item.name]) {
+    calib[item.name] = { frontYawDeg: 0, scaleMul: 1, dropLargest: entry.autoDrop, needsCleanup: false, reviewed: false };
+    save();
+  }
+  return calib[item.name];
+}
+function setState(patch) {
+  if (!current) return;
+  calib[current.item.name] = { ...calib[current.item.name], ...patch };
+  save();
+  fit();
+  syncUI();
+}
+
+// ---------- loading ----------
+const loader = new GLTFLoader();
+loader.setRequestHeader(HDR);
+function loadEntry(item) {
+  if (loaded.has(item.name)) return Promise.resolve(loaded.get(item.name));
+  return new Promise((resolve, reject) => {
+    loader.load(item.glbUrl, gltf => {
+      const model = gltf.scene;
+      model.updateMatrixWorld(true);
+      const parts = [];
+      model.traverse(c => {
+        if (c.isMesh) {
+          const s = new THREE.Vector3();
+          new THREE.Box3().setFromObject(c).getSize(s);
+          parts.push({ mesh: c, m: Math.max(s.x, s.y, s.z) });
+        }
+      });
+      parts.sort((a, b) => b.m - a.m);
+      const largest = parts.length >= 2 ? parts[0].mesh : null;
+      const entry = { model, largest, meshCount: parts.length };
+      entry.autoDrop = suggestDrop(model, largest, item.dimensions);
+      loaded.set(item.name, entry);
+      resolve(entry);
+    }, undefined, reject);
+  });
+}
+
+// ---------- fitting ----------
+function fit() {
+  if (!current) return;
+  const { item, entry } = current;
+  const st = calib[item.name];
+  const dropped = st.dropLargest && entry.largest ? entry.largest : null;
+  if (entry.largest) entry.largest.visible = !dropped;
+  const model = entry.model;
+
+  pivot.rotation.y = 0;
+  model.position.set(0, 0, 0);
+  model.scale.setScalar(1);
+  const raw = sizeOf(model, dropped);
+  let base = baseScaleFor(raw, item.dimensions);
+  model.scale.setScalar(base);
+  let size = sizeOf(model, dropped);
+  const largestDim = Math.max(size.x, size.y, size.z);
+  let capped = false;
+  if (largestDim > MAX_DIM_M) { base *= MAX_DIM_M / largestDim; capped = true; }
+  model.scale.setScalar(base * st.scaleMul);
+
+  const box = boxOf(model, dropped);
+  const c = box.getCenter(new THREE.Vector3());
+  model.position.set(-c.x, -box.min.y, -c.z);
+  pivot.rotation.y = deg(st.frontYawDeg);
+  if (!pivot.children.includes(model)) pivot.add(model);
+
+  const now = sizeOf(pivot, dropped);
+  current.fitInfo = { raw, base, capped, size: now, dropped: !!dropped };
+
+  if (dimsBox) { helpers.remove(dimsBox); dimsBox.geometry.dispose(); dimsBox = null; }
+  const d = item.dimensions;
+  if (d && d.width_cm && d.depth_cm && d.height_cm) {
+    const w = d.width_cm / 100, dp = d.depth_cm / 100, h = d.height_cm / 100;
+    dimsBox = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(w, h, dp)),
+      new THREE.LineBasicMaterial({ color: 0xFFB703 })
+    );
+    dimsBox.position.set(0, h / 2, 0);
+    helpers.add(dimsBox);
+  }
+}
+
+// ---------- UI ----------
+function badges(item) {
+  const st = calib[item.name];
+  let s = "";
+  if (st && st.reviewed) s += "✓ ";
+  if (st && st.needsCleanup) s += "⚠ ";
+  if (item.thumbMissing) s += "📷";
+  return s;
+}
+function renderList() {
+  const list = $("list");
+  const top = list.scrollTop;
+  list.innerHTML = "";
+  items.forEach((item, i) => {
+    const row = document.createElement("div");
+    row.className = "row" + (i === currentIdx ? " active" : "");
+    row.innerHTML = `<div><div>${item.name}</div><div class="cat">${item.category}</div></div><div class="badges">${badges(item)}</div>`;
+    row.addEventListener("click", () => select(i));
+    list.appendChild(row);
+  });
+  list.scrollTop = top;
+  const act = list.querySelector(".row.active");
+  if (act) act.scrollIntoView({ block: "nearest" });
+  const done = items.filter(i => calib[i.name] && calib[i.name].reviewed).length;
+  $("progress").textContent = `Reviewed ${done} / ${items.length}`;
+}
+const pct = (val, ref) => ref ? `${val >= ref ? "+" : ""}${((val / ref - 1) * 100).toFixed(0)}%` : "n/a";
+function syncUI() {
+  renderList();
+  if (!current) return;
+  const { item, entry, fitInfo } = current;
+  const st = calib[item.name];
+  const d = item.dimensions || {};
+  const s = fitInfo.size;
+  $("scaleMul").value = st.scaleMul;
+  $("dropLargest").checked = !!st.dropLargest;
+  $("dropLargest").disabled = !entry.largest;
+  $("cleanup").checked = !!st.needsCleanup;
+  $("readout").textContent =
+    `${item.name}   (${item.category}, ${item.style})   meshes: ${entry.meshCount}\n` +
+    `raw size (mesh units) : ${fitInfo.raw.x.toFixed(2)} × ${fitInfo.raw.y.toFixed(2)} × ${fitInfo.raw.z.toFixed(2)}\n` +
+    `recorded  W×D×H (cm)  : ${d.width_cm} × ${d.depth_cm} × ${d.height_cm}\n` +
+    `final     W×D×H (cm)  : ${(s.x * 100).toFixed(0)} × ${(s.z * 100).toFixed(0)} × ${(s.y * 100).toFixed(0)}` +
+    `   (W ${pct(s.x * 100, d.width_cm)}, D ${pct(s.z * 100, d.depth_cm)}, H ${pct(s.y * 100, d.height_cm)})\n` +
+    `scale: base ${fitInfo.base.toPrecision(3)} × ${st.scaleMul}   front turn: ${st.frontYawDeg}°` +
+    (fitInfo.capped ? "   [capped at 2.6 m]" : "");
+  const hints = [];
+  const yh = yawHint(s, item.dimensions);
+  if (yh) hints.push(yh);
+  if (entry.autoDrop && st.dropLargest) hints.push("Largest mesh dropped: it made the model's proportions wrong (likely stray geometry).");
+  if (entry.autoDrop && !st.dropLargest) hints.push("Tool suggested dropping the largest mesh; you turned that off.");
+  $("hint").textContent = hints.join("\n");
+}
+
+async function select(i) {
+  if (i < 0 || i >= items.length) return;
+  const token = ++selectToken;
+  currentIdx = i;
+  const item = items[i];
+  $("readout").textContent = `Loading ${item.name}…`;
+  renderList();
+  let entry;
+  try { entry = await loadEntry(item); }
+  catch (e) { $("readout").textContent = `Could not load ${item.name}: ${e && e.message ? e.message : e}`; return; }
+  if (token !== selectToken) return;
+  if (current && current.entry.model.parent === pivot) pivot.remove(current.entry.model);
+  ensureState(item, entry);
+  current = { item, entry, fitInfo: null };
+  fit();
+  syncUI();
+}
+
+// ---------- controls ----------
+const turn = delta => current && setState({ frontYawDeg: (((calib[current.item.name].frontYawDeg + delta) % 360) + 360) % 360 });
+$("btnCCW").onclick = () => turn(90);
+$("btnCW").onclick = () => turn(-90);
+$("btnFlip").onclick = () => turn(180);
+$("scaleMul").addEventListener("change", e => {
+  const v = parseFloat(e.target.value);
+  if (current && v > 0) setState({ scaleMul: v });
+});
+$("dropLargest").addEventListener("change", e => current && setState({ dropLargest: e.target.checked }));
+$("cleanup").addEventListener("change", e => current && setState({ needsCleanup: e.target.checked }));
+function confirmAndNext() {
+  if (!current) return;
+  const s = current.fitInfo.size;
+  setState({ reviewed: true, sizeM: { w: +s.x.toFixed(3), d: +s.z.toFixed(3), h: +s.y.toFixed(3) } });
+  for (let k = 1; k <= items.length; k++) {
+    const j = (currentIdx + k) % items.length;
+    if (!(calib[items[j].name] && calib[items[j].name].reviewed)) { select(j); return; }
+  }
+  $("hint").textContent = "All items reviewed. Download the JSON.";
+}
+$("btnConfirm").onclick = confirmAndNext;
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "ArrowRight") select(currentIdx + 1);
+  else if (e.key === "ArrowLeft") select(currentIdx - 1);
+  else if (e.key === "e") turn(90);
+  else if (e.key === "r") turn(-90);
+  else if (e.key === "f") turn(180);
+  else if (e.key === "Enter") confirmAndNext();
+});
+
+// ---------- thumbnails ----------
+const thumbCam = new THREE.PerspectiveCamera(35, 1, 0.05, 60);
+function captureThumbnail() {
+  const { entry } = current;
+  const st = calib[current.item.name];
+  const dropped = st.dropLargest && entry.largest ? entry.largest : null;
+  const sphere = boxOf(pivot, dropped).getBoundingSphere(new THREE.Sphere());
+  const dist = (sphere.radius / Math.sin(deg(35 / 2))) * 1.05;
+  const dir = new THREE.Vector3(0.75, 0.5, 1).normalize();
+  thumbCam.position.copy(sphere.center).addScaledVector(dir, dist);
+  thumbCam.lookAt(sphere.center);
+
+  const prevBg = scene.background, prevRatio = renderer.getPixelRatio();
+  helpers.visible = false;
+  scene.background = new THREE.Color(0xE9EDF2);
+  renderer.setPixelRatio(1);
+  renderer.setSize(512, 512, false);
+  renderer.render(scene, thumbCam);
+  const url = renderer.domElement.toDataURL("image/png");
+  helpers.visible = true;
+  scene.background = prevBg;
+  renderer.setPixelRatio(prevRatio);
+  resize();
+  return url;
+}
+function download(url, filename) {
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+$("btnThumb").onclick = () => current && download(captureThumbnail(), `${current.item.base}.png`);
+$("btnMissing").onclick = async () => {
+  const todo = items.filter(i => i.thumbMissing);
+  if (!todo.length) { $("hint").textContent = "No missing thumbnails."; return; }
+  for (const it of todo) {
+    await select(items.indexOf(it));
+    if (!current || current.item !== it) continue;
+    download(captureThumbnail(), `${it.base}.png`);
+    await new Promise(r => setTimeout(r, 600));
+  }
+  $("hint").textContent = `Downloaded ${todo.length} thumbnails. Copy them into backend/models_3d/.`;
+};
+
+// ---------- export ----------
+function buildExport() {
+  const out = {
+    convention: "model.rotation.y = frontYawDeg (degrees) turns the model's front toward +Z. Final size = uniform base scale (longest recorded dimension) x scaleMul. dropLargestMesh: remove the largest mesh (stray geometry) before measuring and rendering.",
+    generated: new Date().toISOString(),
+    items: {}
+  };
+  for (const it of items) {
+    const st = calib[it.name];
+    if (!st) continue;
+    out.items[it.name] = {
+      frontYawDeg: st.frontYawDeg, scaleMul: st.scaleMul, dropLargestMesh: !!st.dropLargest,
+      needsCleanup: !!st.needsCleanup, reviewed: !!st.reviewed, sizeM: st.sizeM || null
+    };
+  }
+  return out;
+}
+$("btnDownload").onclick = () => {
+  const blob = new Blob([JSON.stringify(buildExport(), null, 2)], { type: "application/json" });
+  download(URL.createObjectURL(blob), "model-calibration.json");
+};
+$("btnCopy").onclick = async () => {
+  try { await navigator.clipboard.writeText(JSON.stringify(buildExport(), null, 2)); $("hint").textContent = "JSON copied."; }
+  catch { $("hint").textContent = "Copy failed; use Download JSON."; }
+};
+
+// ---------- boot ----------
+async function boot() {
+  try {
+    const res = await fetch(`${ORIGIN}/api/v1/catalog/furniture`, { headers: HDR });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    items = (data.items || []).map(it => {
+      const path = new URL(it.model_asset_url).pathname;
+      const glbUrl = ORIGIN + path;
+      return {
+        ...it, glbUrl, pngUrl: glbUrl.replace(/\.glb$/i, ".png"),
+        base: path.split("/").pop().replace(/\.glb$/i, ""), thumbMissing: false
+      };
+    });
+  } catch (e) {
+    $("progress").textContent = "Catalog failed: " + e.message;
+    return;
+  }
+  renderList();
+  await Promise.all(items.map(async it => {
+    try {
+      const r = await fetch(it.pngUrl, { method: "HEAD", headers: HDR, cache: "no-store" });
+      it.thumbMissing = !r.ok;
+    } catch { it.thumbMissing = false; }
+  }));
+  renderList();
+  const firstOpen = items.findIndex(i => !(calib[i.name] && calib[i.name].reviewed));
+  select(firstOpen >= 0 ? firstOpen : 0);
+}
+boot();
+</script>
+</body>
+</html>
